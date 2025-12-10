@@ -1,0 +1,22 @@
+services:
+  hnsttp:
+    build: .
+    container_name: pytorch-research
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    volumes:
+      - ./:/workspace
+
+    ports:
+      - "8888:8888"
+
+    stdin_open: true
+    tty: true
+    command: jupyter lab --ip=0.0.0.0 --allow-root --no-browser
