@@ -2,6 +2,9 @@ services:
   hnsttp:
     build: .
     container_name: pytorch-research
+    privileged: true
+    pid: host
+    shm_size: '8gb'
 
     deploy:
       resources:
@@ -19,4 +22,5 @@ services:
 
     stdin_open: true
     tty: true
-    command: jupyter lab --ip=0.0.0.0 --allow-root --no-browser
+    restart: unless-stopped
+    command: jupyter lab --ip=0.0.0.0 --allow-root --no-browser --NotebookApp.token=''

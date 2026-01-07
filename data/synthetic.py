@@ -4,149 +4,182 @@ from collections import defaultdict
 
 class ComplexRule:
     # Multiple source rules occur within a time window -> target event after a delay
-    def __init__(self, rule_id, sources, target, window, delay_mu, delay_std, base_prob=1.0):
+    def __init__(self, rule_id, source_configs, target, base_prob=1.0):
         """
         :param rule_id: Distinct ID of the rule
-        :param sources: List of source event types
+        :param source_configs: Dict defining requirements for each source type.
+                               Format: { source_type_id: {'mu': float, 'std': float}, ... }
+                               - mu: How far back in time the source must occur (Lag)
+                               - std: Standard Deviation of the lag
         :param target: Target event type
-        :param window: Size of the time window that the sources must occur within
-        :param delay_mu: Mean delay before the target event occurs
-        :param delay_std: Standard deviation of the delay
         :param base_prob: Base probability of the rule triggering
         """
         self.rule_id = rule_id
-        self.sources = set(sources)
+        self.source_configs = source_configs
+        self.sources = set(source_configs.keys())
         self.target = target
-        self.window = window
-        self.delay_mu = delay_mu
-        self.delay_std = delay_std
         self.base_prob = base_prob
 
-    def check_logic(self, history, current_time, current_type):
-        if current_type not in self.sources:
-            return False
-
-        window_start = current_time - self.window
-        
-        for src in self.sources:
-            if src == current_type:
-                continue
-
-            if src not in history or not history[src]:
-                return False
-            
-            if history[src][-1] < window_start:
-                return False
-
-        return True
     
+    def check_pattern_consensus(self, history, current_time, current_type):
+        """
+        Check if the current event (current_time, current_type) can trigger the rule
+        based on consensus from other source events in history.
+        """
+        if current_type not in self.sources:
+            return None
 
-def generate_base_events(time_horizon, base_intensities):
-    events = []
-    current_t = 0.0
+        my_config = self.source_configs[current_type]
+        projected_target_time = current_time + my_config['mu']
+        
+        matched_times = [current_time]
 
-    for type_id, rate in base_intensities.items():
-        current_t =0.0
-        while True:
-            if rate <= 0: 
-                break
+        for src, config in self.source_configs.items():
+            if src == current_type: continue
+            
+            ideal_src_time = projected_target_time - config['mu']
+            tolerance = 3 * config['std']
+            
+            found = False
+            if src in history:
+                for past_t in reversed(history[src]):
+                    if past_t < ideal_src_time - tolerance:
+                        break
+                    
+                    if abs(past_t - ideal_src_time) <= tolerance:
+                        matched_times.append(past_t)
+                        found = True
+                        break 
+            
+            if not found:
+                return None
 
-            dt = np.random.exponential(scale=1.0 / rate)
-            current_t += dt
-            if current_t > time_horizon:
-                break
-
-            events.append((current_t, type_id, None))
-
-        events.sort(key=lambda x: x[0])
-
-    return events
-
+        return projected_target_time, matched_times
+    
 
 def generate_complex_data(rules, interactions, num_samples, time_horizon, base_intensities, max_len=1024):
-    """
-    :param rules: List of ComplexRule objects defining the logic and interactions
-    :param interactions: List of interaction dicts defining how rules affect each other in shape of
-                        [{'src': rule_id, 'tgt': rule_id, 'factor': float, 'duration': float}]
-                        - Factor < 1.0: Inhibition (0.0=Hard Block, 0.5=Soft Inhibition)
-                        - Factor > 1.0: Excitation 
-    :param num_samples: Number of sequences to generate
-    :param seq_len: Length of each sequence
-    :param base_intensities: Dict of base intensities for each event type {type_id: intensity}
-    """
     data = []
     
-    interaction_map = defaultdict(list)
+    interactions_by_target = defaultdict(list)
     for inter in interactions:
-        interaction_map[inter['src']].append(inter)
+        srcs = inter.get('sources', inter.get('src'))
+        if not isinstance(srcs, list):
+            srcs = [srcs]
+        
+        inter_config = {
+            'sources': set(srcs),
+            'tgt': inter['tgt'],
+            'factor': inter['factor'],
+            'beta': inter['beta']
+        }
+        interactions_by_target[inter['tgt']].append(inter_config)
+        
+    rules_by_trigger = defaultdict(list)
+    for rule in rules:
+        for src in rule.sources:
+            rules_by_trigger[src].append(rule)
 
     for _ in range(num_samples):
-        # Priority Queue: (time, event_type, source_rule_id)
-        # source_rule_id가 None이면 랜덤 발생(Base), 아니면 규칙에 의해 발생
         event_queue = []
-        
-        # Basic events
-        base_events = generate_base_events(time_horizon, base_intensities)
-    
-        for e in base_events:
-            heapq.heappush(event_queue, e)
 
-        final_sequence = []
+        for type_id, rate in base_intensities.items():
+            if rate <= 0: 
+                continue
+
+            first_t = np.random.exponential(scale=1.0 / rate)
+            if first_t <= time_horizon:
+                heapq.heappush(event_queue, (first_t, type_id, 0))
+
+        full_sequence = []
         history = defaultdict(list) 
-        active_modifiers = defaultdict(list)
+        rule_last_occurrence = {}
 
-        # Simulation Loop
         while event_queue:
             curr_t, curr_k, src_rule_id = heapq.heappop(event_queue)
             
-            if curr_t > time_horizon or len(final_sequence) >= max_len:
+            if curr_t > time_horizon: 
+                break
+            if len(full_sequence) >= max_len:
                 break
             
-            # Float point precision check
             if history[curr_k] and abs(history[curr_k][-1] - curr_t) < 1e-6:
                 continue
 
-            final_sequence.append((curr_t, curr_k))
+            # Baseline Event Generation
+            if src_rule_id == 0:
+                rate = base_intensities[curr_k]
+                dt = np.random.exponential(scale=1.0 / rate)
+                next_t = curr_t + dt
+                
+                if next_t <= time_horizon:
+                    heapq.heappush(event_queue, (next_t, curr_k, 0))
+
+            # Event Commit
+            full_sequence.append((curr_t, curr_k, src_rule_id))
             history[curr_k].append(curr_t)
 
-            # Rule Evaluation
-            for rule in rules:
-                if rule.check_logic(history, curr_t, curr_k):
-                    current_factor = 1.0
-                    valid_mods = []
-                    # Check interaction modifiers
-                    if rule.rule_id in active_modifiers:
-                        for expiry, factor in active_modifiers[rule.rule_id]:
-                            if expiry > curr_t: 
-                                current_factor *= factor
-                                valid_mods.append((expiry, factor))
+            if src_rule_id > 0:
+                rule_last_occurrence[src_rule_id] = curr_t
 
-                        active_modifiers[rule.rule_id] = valid_mods
+            # Rule evaluation
+            potential_rules = rules_by_trigger[curr_k]
+            for rule in potential_rules:
+                consensus = rule.check_pattern_consensus(history, curr_t, curr_k)
+                
+                if consensus:
+                    target_proposal_time, matched_times = consensus
+                    interaction_effect_sum = 0.0
+                    
+                    if rule.rule_id in interactions_by_target:
+                        
+                        for inter in interactions_by_target[rule.rule_id]:
+                            required_sources = inter['sources']
+                            beta = inter['beta']
+                            factor = inter['factor']
+                            
+                            source_times = []
+                            all_satisfied = True
+                            
+                            for src_id in required_sources:
+                                last_t = rule_last_occurrence.get(src_id)
+                                
+                                if last_t is None:
+                                    all_satisfied = False
+                                    break
+                                
+                                dt = curr_t - last_t
+                                if dt * beta >= 5.0:
+                                    all_satisfied = False
+                                    break
+                                    
+                                source_times.append(last_t)
+                            
+                            if all_satisfied:
+                                t_latest = max(source_times)
+                                delay_from_completion = curr_t - t_latest
+                                
+                                weight = np.exp(-beta * delay_from_completion)
+                                interaction_effect_sum += (factor - 1.0) * weight
+
+                    current_factor = max(0.0, 1.0 + interaction_effect_sum)
                     
                     final_prob = rule.base_prob * current_factor
                     final_prob = max(0.0, min(1.0, final_prob))
                     
-                    # Rule Trigger Check
                     if np.random.rand() < final_prob:
-                        delay = np.random.normal(rule.delay_mu, rule.delay_std)
-                        new_t = curr_t + delay
+                        jitter = np.random.normal(0, 0.1)
+                        new_t = max(curr_t + 0.01, target_proposal_time + jitter)
                         
                         if new_t <= time_horizon:
                             heapq.heappush(event_queue, (new_t, rule.target, rule.rule_id))
-                            
-                            if rule.rule_id in interaction_map:
-                                for eff in interaction_map[rule.rule_id]:
-                                    target_id = eff['tgt']
-                                    expiry = curr_t + eff['duration']
-                                    factor = eff['factor']
-                                    active_modifiers[target_id].append((expiry, factor))
 
-        final_sequence.sort(key=lambda x: x[0])
-        if final_sequence:
-            times, events = zip(*[(t, k) for t, k in final_sequence])
+        full_sequence.sort(key=lambda x: x[0])
+        if full_sequence:
+            times, events, labels = zip(*full_sequence)
             data.append({
                 'time': list(times),
-                'event': list(events)
+                'event': list(events),
+                'label': list(labels)
             })
 
     return data

@@ -33,135 +33,183 @@ def is_in_interval(t, intervals):
 
 def validate_generated_data(dataset, rules, interactions):
     # Examine the generated synthetic data to follow the defined rules and interactions.
-    
-    total_seqs = len(dataset)
-    print(f"Total Sequences: {total_seqs}")
+    print(f"Total Sequences: {len(dataset)}")
 
     # Logic rule verification
     print("\n[1. Logic Rule Verification]")
-    
+
     for rule in rules:
         target_counts = 0
-        explained_counts = 0
-        
-        max_lookback = rule.window + rule.delay_mu + 3 * rule.delay_std
-        min_lookback = rule.delay_mu - 3 * rule.delay_std
-        
+        valid_logic_counts = 0
+    
         for seq in dataset:
             times = np.array(seq['time'])
             events = np.array(seq['event'])
+            labels = np.array(seq['label'])
             
-            target_indices = np.where(events == rule.target)[0]
+            triggered_indices = np.where(labels == rule.rule_id)[0]
             
-            for t_idx in target_indices:
-                t_target = times[t_idx]
+            for t_idx in triggered_indices:
                 target_counts += 1
-
-                # Check for source events in the lookback window
-                search_mask = (times >= t_target - max_lookback) & (times < t_target - min_lookback)
-                recent_events = set(events[search_mask])
-
-                if rule.sources.issubset(recent_events):
-                    explained_counts += 1
+                t_target = times[t_idx]
+                
+                all_sources_found = True
+                
+                for src_type, config in rule.source_configs.items():
+                    ideal_src_time = t_target - config['mu']
+                    tolerance = 3 * config['std']
+                    
+                    search_start = ideal_src_time - tolerance
+                    search_end = ideal_src_time + tolerance
+                    
+                    mask = (times >= search_start) & (times <= search_end) & (events == src_type)
+                    
+                    if not np.any(mask):
+                        all_sources_found = False
+                        break
+                
+                if all_sources_found:
+                    valid_logic_counts += 1
 
         if target_counts > 0:
-            ratio = explained_counts / target_counts * 100
-            print(f"  Rule {rule.rule_id} ({rule.sources} -> {rule.target}):")
-            print(f"    - Total Targets: {target_counts}")
-            print(f"    - Explained ratio: {ratio:.1f} %")
-
+            ratio = valid_logic_counts / target_counts * 100
+            print(f"  Rule {rule.rule_id} (Target {rule.target}):")
+            print(f"    - Triggered: {target_counts} times")
+            print(f"    - Logic Validated: {ratio:.1f}% (Matched source timings)")
         else:
-            print(f"  Rule {rule.rule_id}: No target events found.")
+            print(f"  Rule {rule.rule_id}: Not triggered.")
 
-    # Interaction verification
+
     print("\n[2. Interaction Verification]")
     
-    interaction_map = defaultdict(list)
-    for inter in interactions:
-        interaction_map[inter['src']].append(inter)
+    rules_map = {r.rule_id: r for r in rules}
 
-    for src_rule_id, effects in interaction_map.items():
-        # Find triggering rule
-        src_rule = next((r for r in rules if r.rule_id == src_rule_id), None)
-        if not src_rule:
+    for i, inter in enumerate(interactions):
+        srcs = inter.get('sources', inter.get('src'))
+        if not isinstance(srcs, list): srcs = [srcs]
+        
+        target_rule_id = inter['tgt']
+        factor = inter['factor']
+        beta = inter['beta']
+        
+        target_rule = rules_map.get(target_rule_id)
+        if not target_rule:
+            print(f"  Warning: Target Rule {target_rule_id} not found.")
             continue
+            
+        target_delay = min(cfg['mu'] for cfg in target_rule.source_configs.values())
         
-        src_event_type = src_rule.target
+        effective_duration = 5.0 / (beta + 1e-9)
         
-        for eff in effects:
-            target_rule_id = eff['tgt']
-            tgt_rule = next((r for r in rules if r.rule_id == target_rule_id), None)
-            if not tgt_rule: 
-                continue
+        type_str = "Excitation (+)" if factor > 1.0 else "Inhibition (-)"
+        
+        total_time_active = 0.0
+        total_time_global = 0.0
+        
+        count_active = 0
+        count_global = 0
+        
+        for seq in dataset:
+            times = np.array(seq['time'])
+            labels = np.array(seq['label'])
             
-            target_event_type = tgt_rule.target
-            duration = eff['duration']
-            factor = eff['factor']
-            type_str = "Inhibition" if factor < 1.0 else "Excitation"
+            if len(times) == 0: continue
+            total_time_global += times[-1]
             
-            total_time_global = 0.0
-            total_time_active = 0.0
+            count_global += np.sum(labels == target_rule_id)
             
-            count_global = 0
-            count_active = 0
+            src_occurrences = {}
+            for src_id in srcs:
+                src_occurrences[src_id] = times[labels == src_id]
             
-            for seq in dataset:
-                times = np.array(seq['time'])
-                events = np.array(seq['event'])
-
-                if len(times) == 0:
-                    continue
-                
-                total_time_global += times[-1]
-                count_global += np.sum(events == target_event_type)
-
-                src_indices = np.where(events == src_event_type)[0]
-                raw_intervals = []
-                for s_idx in src_indices:
-                    t_start = times[s_idx]
-                    t_end = min(t_start + duration, times[-1])
-                    if t_end > t_start:
-                        raw_intervals.append((t_start, t_end))
-
-                merged_len, merged_intervals = merge_intervals(raw_intervals)
-                total_time_active += merged_len
-
-                target_indices = np.where(events == target_event_type)[0]
-                for t_idx in target_indices:
-                    t_ev = times[t_idx]
-                    if is_in_interval(t_ev, merged_intervals):
-                        count_active += 1
-
-            total_time_non_active = total_time_global - total_time_active
-            count_non_active = count_global - count_active
-
-            density_active = count_active / total_time_active if total_time_active > 1e-6 else 0.0
-            density_non_active = count_non_active / total_time_non_active if total_time_non_active > 1e-6 else 0.0
+            raw_intervals = []
             
-            print(f"  Interaction (Rule {src_rule_id} -> Rule {target_rule_id}): {type_str} (Factor {factor})")
-            print(f"    - Non-Active Rate (Background): {density_non_active:.4f} Hz")
-            print(f"    - Active Rate (Interaction):    {density_active:.4f} Hz")
+            candidate_times = []
+            for t_list in src_occurrences.values():
+                candidate_times.extend(t_list)
+            candidate_times = sorted(list(set(candidate_times)))
             
-            passed = False
-            if factor < 1.0: # Inhibition
-                if density_active < density_non_active: passed = True
-            else: # Excitation
-                if density_active > density_non_active: passed = True
-                
-            status = "VERIFIED" if passed else "WARNING"
-            print(f"    {status} (Active vs Non-Active)")
+            for t_curr in candidate_times:
+                all_satisfied = True
+                for src_id in srcs:
+                    valid_acts = src_occurrences[src_id][src_occurrences[src_id] <= t_curr]
+                    if len(valid_acts) == 0:
+                        all_satisfied = False
+                        break
+                    last_t = valid_acts[-1]
+                    if (t_curr - last_t) * beta >= 5.0:
+                        all_satisfied = False
+                        break
+                        
+                if all_satisfied:
+                    start_active = t_curr + target_delay
+                    end_active = start_active + effective_duration
+                    
+                    if start_active < times[-1]:
+                        raw_intervals.append((start_active, min(end_active, times[-1])))
+            
+            merged_len, merged_intervals = merge_intervals(raw_intervals)
+            total_time_active += merged_len
+            
+            target_indices = np.where(labels == target_rule_id)[0]
+            for t_idx in target_indices:
+                t_ev = times[t_idx]
+                if is_in_interval(t_ev, merged_intervals):
+                    count_active += 1
+                    
+        total_time_non_active = max(0, total_time_global - total_time_active)
+        count_non_active = count_global - count_active
+        
+        density_active = count_active / total_time_active if total_time_active > 1e-6 else 0.0
+        density_non_active = count_non_active / total_time_non_active if total_time_non_active > 1e-6 else 0.0
+        
+        ratio = density_active / (density_non_active + 1e-9)
+        
+        print(f"  Interaction (Sources {srcs} -> Target {target_rule_id}): {type_str} Factor={factor}")
+        print(f"    - Shifted Window: +{target_delay:.1f}s (Adjusted for Delay)")
+        print(f"    - Background Rate: {density_non_active:.4f} Hz")
+        print(f"    - Active Rate:     {density_active:.4f} Hz")
+        print(f"    - Observed Ratio:  {ratio:.2f}")
+        
+        passed = False
+        if factor > 1.0: 
+            if density_active > density_non_active: passed = True
+        else:
+            if density_active < density_non_active: passed = True
+            
+        status = "PASSED" if passed else "WARNING"
+        print(f"    -> {status}")
 
 
 if __name__ == "__main__":
+    # Test Setup
     rules = [
-        ComplexRule(rule_id=1, sources={1, 3}, target=5, window=10.0, delay_mu=5.0, delay_std=1.0, base_prob=0.8),
-        ComplexRule(rule_id=2, sources={3, 4}, target=6, window=8.0, delay_mu=3.0, delay_std=0.5, base_prob=0.5),
-        ComplexRule(rule_id=3, sources={2}, target=7, window=5.0, delay_mu=2.5, delay_std=0.5, base_prob=0.6),
-    ]
-    interactions = [
-        {'src': 3, 'tgt': 2, 'duration': 15.0, 'factor': 0.2},  # Inhibition
-        {'src': 1, 'tgt': 2, 'duration': 10.0, 'factor': 2.0},  # Excitation
+        ComplexRule(rule_id=1, 
+                    source_configs={1: {'mu': 5.0, 'std': 1.0}, 3: {'mu': 1.0, 'std': 0.2}}, 
+                    target=5, base_prob=0.8),
+
+        ComplexRule(rule_id=2, 
+                    source_configs={3: {'mu': 3.0, 'std': 0.5}, 4: {'mu': 3.0, 'std': 0.5}}, 
+                    target=6, base_prob=0.5),
+        
+        ComplexRule(rule_id=3, 
+                    source_configs={2: {'mu': 2.5, 'std': 0.5}}, 
+                    target=7, base_prob=0.6),
     ]
 
-    data = generate_complex_data(rules, interactions, num_samples=500, time_horizon=2000.0, base_intensities={1: 1.5, 2: 0.8, 3: 0.7, 4: 1.0, 5: 0.05, 6: 0.05, 7: 0.05})
+    interactions = [
+        {'sources': [3], 'tgt': 1, 'beta': 1.0, 'factor': 0.2}, 
+        
+        {'sources': [1], 'tgt': 2, 'beta': 0.5, 'factor': 2.0},
+        
+        {'sources': [1, 3], 'tgt': 2, 'beta': 2.0, 'factor': 5.0}
+    ]
+
+    data = generate_complex_data(
+        rules, interactions, 
+        num_samples=500, 
+        time_horizon=1000.0, 
+        base_intensities={1: 1.5, 2: 0.8, 3: 0.7, 4: 1.0, 5: 0.05, 6: 0.05, 7: 0.05}
+    )
+    
     validate_generated_data(data, rules, interactions)

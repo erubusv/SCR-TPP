@@ -1,0 +1,18 @@
+num_types: 5
+num_event_types: 5
+pad_token_id: 5
+num_rules: 2
+embed_dim: 32
+num_heads: 3
+tau: 0.5
+mc_samples: 10
+lambda_ortho: 1e-3
+lambda_sparse: 1e-3
+lambda_interaction: 1e-3
+learning_rate: 1e-2
+batch_size: 32
+epochs: 20
+
+path:
+  data_path: './data/synthetic_data.pkl'
+  model_save_path: './workspace/saved_models/synthetic/HNSTPP'
