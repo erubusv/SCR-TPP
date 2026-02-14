@@ -1,185 +1,278 @@
+"""Synthetic data generator for HNSTPP-Refactored (multiplicative inhibition).
+
+Intensity:
+    lambda_k(t) = (b_k + E_k(t)) * exp(-I_k(t)) + eps
+where
+    E_k(t) = sum_{r:target(r)=k} W_pos[r] * p_r(t)
+    I_k(t) = sum_{r:target(r)=k} W_neg[r] * p_r(t)
+    p_r(t) = ReLU(sum_{src in cond(r)} K_src(t) - bias_r)
+"""
+
 import numpy as np
-import heapq
 from collections import defaultdict
+from numba import njit
+from tqdm import tqdm
 
-class ComplexRule:
-    # Multiple source rules occur within a time window -> target event after a delay
-    def __init__(self, rule_id, source_configs, target, base_prob=1.0):
-        """
-        :param rule_id: Distinct ID of the rule
-        :param source_configs: Dict defining requirements for each source type.
-                               Format: { source_type_id: {'mu': float, 'std': float}, ... }
-                               - mu: How far back in time the source must occur (Lag)
-                               - std: Standard Deviation of the lag
-        :param target: Target event type
-        :param base_prob: Base probability of the rule triggering
-        """
-        self.rule_id = rule_id
-        self.source_configs = source_configs
-        self.sources = set(source_configs.keys())
-        self.target = target
-        self.base_prob = base_prob
 
-    
-    def check_pattern_consensus(self, history, current_time, current_type):
-        """
-        Check if the current event (current_time, current_type) can trigger the rule
-        based on consensus from other source events in history.
-        """
-        if current_type not in self.sources:
-            return None
+@njit(fastmath=True, cache=True, inline='always')
+def triangular_kernel_func(dt, peak, width, mix_weight):
+    """Asymmetric triangular kernel on [0, width] with peak at `peak`."""
+    if dt <= 0.0 or dt > width:
+        return 0.0
 
-        my_config = self.source_configs[current_type]
-        projected_target_time = current_time + my_config['mu']
-        
-        matched_times = [current_time]
+    eps = 1e-12
+    if peak <= eps:
+        return mix_weight * (width - dt) / max(width, eps)
+    if peak >= width - eps:
+        return mix_weight * (dt / max(width, eps))
 
-        for src, config in self.source_configs.items():
-            if src == current_type: continue
-            
-            ideal_src_time = projected_target_time - config['mu']
-            tolerance = 3 * config['std']
-            
-            found = False
-            if src in history:
-                for past_t in reversed(history[src]):
-                    if past_t < ideal_src_time - tolerance:
-                        break
-                    
-                    if abs(past_t - ideal_src_time) <= tolerance:
-                        matched_times.append(past_t)
-                        found = True
-                        break 
-            
-            if not found:
-                return None
+    if dt <= peak:
+        return mix_weight * (dt / peak)
+    return mix_weight * ((width - dt) / (width - peak))
 
-        return projected_target_time, matched_times
-    
 
-def generate_complex_data(rules, interactions, num_samples, time_horizon, base_intensities, max_len=1024):
+class Rule:
+    """Rule container used by the synthetic generator."""
+
+    def __init__(self, rule_id, target, W_pos, W_neg, condition, kernel_params, kernel_type='triangular', bias=0.0):
+        self.rule_id = int(rule_id)
+        self.target = int(target)
+        self.W_pos = max(0.0, float(W_pos))
+        self.W_neg = max(0.0, float(W_neg))
+        self.condition = [int(c) for c in condition]
+        self.kernel_type = kernel_type
+        self.bias = float(bias)
+
+        self.kernel_params_arrays = {}
+        self.max_support = {}
+        for src_type, params in kernel_params.items():
+            src_type = int(src_type)
+            params_array = np.array(params, dtype=np.float64)
+            if params_array.shape[0] == 0:
+                params_array = np.array([[0.5, 1.0, 1.0]], dtype=np.float64)
+
+            # Ensure peak <= width to keep triangular shape valid.
+            params_array[:, 1] = np.maximum(params_array[:, 1], 1e-6)  # width
+            params_array[:, 0] = np.clip(params_array[:, 0], 1e-6, params_array[:, 1] - 1e-6)  # peak
+
+            mix_weights = params_array[:, 2]
+            mix_sum = mix_weights.sum()
+            if mix_sum > 0:
+                params_array[:, 2] = mix_weights / mix_sum
+
+            self.kernel_params_arrays[src_type] = params_array
+            self.max_support[src_type] = float(np.max(params_array[:, 1]))
+
+    def compute_kernel_sum_and_count(self, t, event_history_arrays, event_counts):
+        """Compute raw kernel sum and #events in support windows."""
+        kernel_sum = 0.0
+        count_window = 0
+
+        for src_type in self.condition:
+            count = event_counts[src_type]
+            if count == 0:
+                continue
+
+            max_support = self.max_support.get(src_type, 0.0)
+            idx = count - 1
+            params = self.kernel_params_arrays.get(src_type)
+            if params is None:
+                continue
+
+            while idx >= 0:
+                t_event = event_history_arrays[src_type, idx]
+                dt = t - t_event
+                if dt <= 0.0:
+                    idx -= 1
+                    continue
+                if dt > max_support:
+                    break
+
+                count_window += 1
+                for i in range(len(params)):
+                    peak, width, mix_weight = params[i, 0], params[i, 1], params[i, 2]
+                    if self.kernel_type == 'triangular':
+                        val = triangular_kernel_func(dt, peak, width, mix_weight)
+                    else:
+                        val = triangular_kernel_func(dt, peak, width, mix_weight)
+                    kernel_sum += val
+
+                idx -= 1
+
+        return kernel_sum, count_window
+
+    def compute_activation(self, t, event_history_arrays, event_counts):
+        kernel_sum, _ = self.compute_kernel_sum_and_count(t, event_history_arrays, event_counts)
+        return max(0.0, kernel_sum - self.bias)
+
+
+def generate_multiplicative_data(rules, num_samples, time_horizon, base_intensities, max_len=1024, eps=1e-8):
+    """Generate synthetic event sequences with Ogata thinning."""
     data = []
-    
-    interactions_by_target = defaultdict(list)
-    for inter in interactions:
-        srcs = inter.get('sources', inter.get('src'))
-        if not isinstance(srcs, list):
-            srcs = [srcs]
-        
-        inter_config = {
-            'sources': set(srcs),
-            'tgt': inter['tgt'],
-            'factor': inter['factor'],
-            'beta': inter['beta']
-        }
-        interactions_by_target[inter['tgt']].append(inter_config)
-        
-    rules_by_trigger = defaultdict(list)
+
+    rules_by_target = defaultdict(list)
     for rule in rules:
-        for src in rule.sources:
-            rules_by_trigger[src].append(rule)
+        rules_by_target[rule.target].append(rule)
 
-    for _ in range(num_samples):
-        event_queue = []
+    event_types = sorted(int(k) for k in base_intensities.keys())
+    num_types = len(event_types)
+    type_to_idx = {k: i for i, k in enumerate(event_types)}
+    base_intensity_array = np.array([float(base_intensities[k]) for k in event_types], dtype=np.float64)
 
-        for type_id, rate in base_intensities.items():
-            if rate <= 0: 
+    event_history = np.zeros((num_types, max_len), dtype=np.float64)
+    lambda_k_array = np.zeros(num_types, dtype=np.float64)
+
+    rng = np.random.default_rng()
+
+    for _ in tqdm(range(num_samples), leave=False):
+        t_curr = 0.0
+        event_history.fill(0.0)
+        event_counts_dict = {k: 0 for k in event_types}
+
+        full_sequence_times = np.zeros(max_len, dtype=np.float64)
+        full_sequence_events = np.zeros(max_len, dtype=np.int32)
+        full_sequence_labels = np.zeros(max_len, dtype=np.int32)
+        seq_len = 0
+
+        while t_curr < time_horizon and seq_len < max_len:
+            # Upper bound (ignoring inhibition gives safe upper bound)
+            lambda_max = 0.0
+            for k_idx, k in enumerate(event_types):
+                b_k = base_intensity_array[k_idx]
+                e_bound = 0.0
+                for rule in rules_by_target[k]:
+                    _, count_window = rule.compute_kernel_sum_and_count(t_curr, event_history, event_counts_dict)
+                    e_bound += rule.W_pos * float(count_window)
+                lambda_max += max(0.0, b_k + e_bound) + eps
+
+            if lambda_max < 0.1:
+                lambda_max = 0.1
+
+            u = rng.random()
+            dt = -np.log(u) / lambda_max
+            t_cand = t_curr + dt
+
+            if t_cand > time_horizon:
+                break
+
+            # True intensity
+            lambda_k_array.fill(0.0)
+            for k_idx, k in enumerate(event_types):
+                b_k = base_intensity_array[k_idx]
+                E_k = 0.0
+                I_k = 0.0
+
+                for rule in rules_by_target[k]:
+                    p_r = rule.compute_activation(t_cand, event_history, event_counts_dict)
+                    E_k += rule.W_pos * p_r
+                    I_k += rule.W_neg * p_r
+
+                lambda_k_array[k_idx] = (b_k + E_k) * np.exp(-I_k) + eps
+
+            lambda_total = np.sum(lambda_k_array)
+            if rng.random() >= lambda_total / lambda_max:
+                t_curr = t_cand
+                continue
+            if lambda_total < 1e-10:
+                t_curr = t_cand
                 continue
 
-            first_t = np.random.exponential(scale=1.0 / rate)
-            if first_t <= time_horizon:
-                heapq.heappush(event_queue, (first_t, type_id, 0))
+            type_probs = lambda_k_array / lambda_total
+            selected_type_idx = rng.choice(num_types, p=type_probs)
+            selected_type = event_types[selected_type_idx]
 
-        full_sequence = []
-        history = defaultdict(list) 
-        rule_last_occurrence = {}
+            # Cause labels: base + positive rule causes only.
+            target_rules = rules_by_target[selected_type]
+            num_causes = 1 + len(target_rules)
 
-        while event_queue:
-            curr_t, curr_k, src_rule_id = heapq.heappop(event_queue)
-            
-            if curr_t > time_horizon: 
-                break
-            if len(full_sequence) >= max_len:
-                break
-            
-            if history[curr_k] and abs(history[curr_k][-1] - curr_t) < 1e-6:
-                continue
+            cause_weights = np.zeros(num_causes, dtype=np.float64)
+            cause_ids = np.zeros(num_causes, dtype=np.int32)
 
-            # Baseline Event Generation
-            if src_rule_id == 0:
-                rate = base_intensities[curr_k]
-                dt = np.random.exponential(scale=1.0 / rate)
-                next_t = curr_t + dt
-                
-                if next_t <= time_horizon:
-                    heapq.heappush(event_queue, (next_t, curr_k, 0))
+            cause_weights[0] = max(0.0, base_intensities[selected_type])
+            cause_ids[0] = -1
 
-            # Event Commit
-            full_sequence.append((curr_t, curr_k, src_rule_id))
-            history[curr_k].append(curr_t)
+            for idx, rule in enumerate(target_rules, start=1):
+                p_r = rule.compute_activation(t_cand, event_history, event_counts_dict)
+                cause_weights[idx] = max(0.0, rule.W_pos * p_r)
+                cause_ids[idx] = rule.rule_id
 
-            if src_rule_id > 0:
-                rule_last_occurrence[src_rule_id] = curr_t
+            cause_sum = np.sum(cause_weights)
+            if cause_sum > 1e-10:
+                cause_probs = cause_weights / cause_sum
+                cause_idx = rng.choice(num_causes, p=cause_probs)
+                cause_rule = int(cause_ids[cause_idx])
+            else:
+                cause_rule = -1
 
-            # Rule evaluation
-            potential_rules = rules_by_trigger[curr_k]
-            for rule in potential_rules:
-                consensus = rule.check_pattern_consensus(history, curr_t, curr_k)
-                
-                if consensus:
-                    target_proposal_time, matched_times = consensus
-                    interaction_effect_sum = 0.0
-                    
-                    if rule.rule_id in interactions_by_target:
-                        
-                        for inter in interactions_by_target[rule.rule_id]:
-                            required_sources = inter['sources']
-                            beta = inter['beta']
-                            factor = inter['factor']
-                            
-                            source_times = []
-                            all_satisfied = True
-                            
-                            for src_id in required_sources:
-                                last_t = rule_last_occurrence.get(src_id)
-                                
-                                if last_t is None:
-                                    all_satisfied = False
-                                    break
-                                
-                                dt = curr_t - last_t
-                                if dt * beta >= 5.0:
-                                    all_satisfied = False
-                                    break
-                                    
-                                source_times.append(last_t)
-                            
-                            if all_satisfied:
-                                t_latest = max(source_times)
-                                delay_from_completion = curr_t - t_latest
-                                
-                                weight = np.exp(-beta * delay_from_completion)
-                                interaction_effect_sum += (factor - 1.0) * weight
+            full_sequence_times[seq_len] = t_cand
+            full_sequence_events[seq_len] = selected_type
+            full_sequence_labels[seq_len] = cause_rule
 
-                    current_factor = max(0.0, 1.0 + interaction_effect_sum)
-                    
-                    final_prob = rule.base_prob * current_factor
-                    final_prob = max(0.0, min(1.0, final_prob))
-                    
-                    if np.random.rand() < final_prob:
-                        jitter = np.random.normal(0, 0.1)
-                        new_t = max(curr_t + 0.01, target_proposal_time + jitter)
-                        
-                        if new_t <= time_horizon:
-                            heapq.heappush(event_queue, (new_t, rule.target, rule.rule_id))
+            event_history[selected_type_idx, event_counts_dict[selected_type]] = t_cand
+            event_counts_dict[selected_type] += 1
 
-        full_sequence.sort(key=lambda x: x[0])
-        if full_sequence:
-            times, events, labels = zip(*full_sequence)
+            seq_len += 1
+            t_curr = t_cand
+
+        if seq_len > 0:
             data.append({
-                'time': list(times),
-                'event': list(events),
-                'label': list(labels)
+                'time': full_sequence_times[:seq_len].tolist(),
+                'event': full_sequence_events[:seq_len].tolist(),
+                'label': full_sequence_labels[:seq_len].tolist(),
             })
 
     return data
+
+
+def create_rules_from_config(config):
+    """Create Rule objects from config dict."""
+    rules = []
+
+    for rule_cfg in config.get('rules', []):
+        rule_id = rule_cfg['id']
+        target = rule_cfg['target']
+        W_pos = rule_cfg.get('W_pos', 1.0)
+        W_neg = rule_cfg.get('W_neg', 0.0)
+        kernel_type = rule_cfg.get('kernel', 'triangular')
+        bias = rule_cfg.get('bias', 0.0)
+
+        condition = set(int(k) for k in rule_cfg['condition'].keys())
+
+        kernel_params = {}
+        for src_type, params in rule_cfg['condition'].items():
+            src_type = int(src_type)
+            peaks = params.get('peaks', [0.8])
+            widths = params.get('widths', [1.6])
+            mix_weights = params.get('mix_weights', [1.0])
+            kernel_params[src_type] = list(zip(peaks, widths, mix_weights))
+
+        rules.append(
+            Rule(
+                rule_id=rule_id,
+                target=target,
+                W_pos=W_pos,
+                W_neg=W_neg,
+                condition=condition,
+                kernel_params=kernel_params,
+                kernel_type=kernel_type,
+                bias=bias,
+            )
+        )
+
+    return rules
+
+
+def generate_synthetic_exp(config):
+    """Legacy alias entrypoint."""
+    return generate_multiplicative_data(
+        create_rules_from_config(config),
+        config['num_samples'],
+        config['time_horizon'],
+        config['base_intensity'],
+        max_len=config.get('max_len', 1024),
+    )
+
+
+# Compatibility aliases expected by other scripts.
+generate_exp_data = generate_multiplicative_data
+generate_additive_data = generate_multiplicative_data

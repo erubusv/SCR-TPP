@@ -1,18 +1,102 @@
+# Model parameters
 num_types: 5
 num_event_types: 5
 pad_token_id: 5
-num_rules: 2
-embed_dim: 32
-num_heads: 3
-tau: 0.5
-mc_samples: 10
-lambda_ortho: 1e-3
-lambda_sparse: 1e-3
-lambda_interaction: 1e-3
-learning_rate: 1e-2
-batch_size: 32
-epochs: 20
+
+# HNSTPP configuration (with triangular kernel)
+hnstpp:
+  num_rules: 3
+  embed_dim: 32
+  num_heads: 3
+  start_tau: 5.0  # Increased for more exploration
+  end_tau: 0.5
+  tau_anneal_rate: 0.95  # Slower annealing
+  num_latent_nodes: 2
+  
+  # Triangular kernel configuration
+  # Uses symmetric triangular kernels with closed-form integration
+  # Each kernel mixture has 3 components with:
+  #   - peaks: cumulative deltas ensuring P1 < P2 < P3
+  #   - widths: symmetric half-widths (positive via softplus)
+  #   - weights: mixture weights (sum to 1 via softmax)
+  num_components: 3  # Number of triangular components per mixture
+  min_width: 0.01    # Minimum width to avoid degenerate triangles
+  
+  # Regularization weights
+  lambda_ortho: 1.0e-4
+  lambda_sparse: 1.0e-5     
+  lambda_interaction: 1.0e-6  
+  lambda_struct: 5.0e-4     
+  lambda_dedup: 1.0e-4
+  reg_rule_num: 2
+  lambda_base: 1.0e-5
+  lambda_latent_sparse: 1.0e-4
+  
+  # Training settings (optimized for stability and convergence)
+  start_learning_rate: 5.0e-3
+  min_learning_rate: 5.0e-5
+  batch_size: 1024           
+  epochs: 50               
+  accumulation_steps: 1
+  
+  phase1_epochs: 30
+  phase2_epochs: 20
+  base_reg_relaxed: 1.0e-5   
+  
+  # Memory optimization
+  integral_chunk_size: 128
+  
+  # Interaction learning
+  interaction_warmup_epochs: 5
+  interaction_unfreeze_lr_scale: 2.0
+  
+  # Soft matching thresholds
+  tau_event_gate: 0.2
+  tau_type_gate: 0.2
+  
+  # Output settings
+  model_save_path: './workspace/saved_models/synthetic/HNSTPP'
+  diagnostic_freq: 5
+  gpu: 1
+
+  # Model compilation (IMPORTANT: set to True for 20-30% speedup)
+  # Note: When compile_model=True, num_workers is automatically set to 0
+  # to prevent segmentation faults (known PyTorch issue with CUDA graphs + multiprocessing)
+  compile_model: False
+  
+  # Model variant: 'triangular' for closed-form integration (no MC sampling needed)
+  model_variant: 'triangular'
+
+# NSTPP: Pairwise neuro-symbolic TPP (ICML'24 style)
+nstpp:
+  embed_dim: 32
+  num_heads: 3
+  start_tau: 5.0
+  end_tau: 0.5
+  tau_anneal_rate: 0.98
+  mc_samples: 5
+  lambda_sparse: 1.0e-3
+  start_learning_rate: 5.0e-3
+  min_learning_rate: 5.0e-4
+  batch_size: 32
+  epochs: 30
+  pad_token_id: 5
+  model_save_path: './workspace/saved_models/synthetic/NSTPP'
+  top_k: 2
+  gpu: 0
+
+transformer:
+  embed_dim: 128
+  num_heads: 4
+  n_layers: 2
+  start_learning_rate: 5.0e-3
+  min_learning_rate: 1.0e-5
+  batch_size: 32
+  epochs: 30
+  pad_token_id: 5
+  transformer_save_path: './workspace/saved_models/synthetic/transformer'
+  top_k: 2
+  gpu: 1
 
 path:
   data_path: './data/synthetic_data.pkl'
-  model_save_path: './workspace/saved_models/synthetic/HNSTPP'

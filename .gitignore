@@ -3,9 +3,13 @@ __pycache__/
 
 .ipynb_checkpoints/
 
-*.csv
-*.zip
+**/*.csv
+**/*.zip
 
 .vscode/
 
 .DS_Store
+**/*.pkl
+**/*.pt
+autonomous_codex/
+**/.*
