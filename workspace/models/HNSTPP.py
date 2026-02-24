@@ -14,7 +14,7 @@ import torch.nn.functional as F
 import numpy as np
 
 
-class HNSTPPRefactored(BaseTPP):
+class HNSTPP(BaseTPP):
     """HNSTPP with exact closed-form integration via sweep-line algorithm."""
 
     def __init__(self, config: dict):

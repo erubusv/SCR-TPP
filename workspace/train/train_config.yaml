@@ -1,102 +1,104 @@
-# Model parameters
-num_types: 5
-num_event_types: 5
-pad_token_id: 5
-
-# HNSTPP configuration (with triangular kernel)
 hnstpp:
-  num_rules: 3
-  embed_dim: 32
-  num_heads: 3
-  start_tau: 5.0  # Increased for more exploration
-  end_tau: 0.5
-  tau_anneal_rate: 0.95  # Slower annealing
-  num_latent_nodes: 2
+  # GPU
+  gpu: 0
   
-  # Triangular kernel configuration
-  # Uses symmetric triangular kernels with closed-form integration
-  # Each kernel mixture has 3 components with:
-  #   - peaks: cumulative deltas ensuring P1 < P2 < P3
-  #   - widths: symmetric half-widths (positive via softplus)
-  #   - weights: mixture weights (sum to 1 via softmax)
-  num_components: 3  # Number of triangular components per mixture
-  min_width: 0.01    # Minimum width to avoid degenerate triangles
+  # Model architecture
+  num_rules: 12          # Ground truth=6, 여유 2배로 할당 → sparsity로 pruning
+  num_components: 3      # Triangular kernel mixture components
   
-  # Regularization weights
-  lambda_ortho: 1.0e-4
-  lambda_sparse: 1.0e-5     
-  lambda_interaction: 1.0e-6  
-  lambda_struct: 5.0e-4     
-  lambda_dedup: 1.0e-4
-  reg_rule_num: 2
-  lambda_base: 1.0e-5
-  lambda_latent_sparse: 1.0e-4
-  
-  # Training settings (optimized for stability and convergence)
-  start_learning_rate: 5.0e-3
-  min_learning_rate: 5.0e-5
-  batch_size: 1024           
-  epochs: 50               
-  accumulation_steps: 1
-  
-  phase1_epochs: 30
-  phase2_epochs: 20
-  base_reg_relaxed: 1.0e-5   
-  
-  # Memory optimization
-  integral_chunk_size: 128
-  
-  # Interaction learning
-  interaction_warmup_epochs: 5
-  interaction_unfreeze_lr_scale: 2.0
-  
-  # Soft matching thresholds
-  tau_event_gate: 0.2
-  tau_type_gate: 0.2
-  
-  # Output settings
-  model_save_path: './workspace/saved_models/synthetic/HNSTPP'
-  diagnostic_freq: 5
-  gpu: 1
+  # Training schedule
+  epochs: 120            # Phase 1 + Phase 2 + Phase 3
+  batch_size: 64
+  learning_rate: 3.0e-3
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
 
-  # Model compilation (IMPORTANT: set to True for 20-30% speedup)
-  # Note: When compile_model=True, num_workers is automatically set to 0
-  # to prevent segmentation faults (known PyTorch issue with CUDA graphs + multiprocessing)
-  compile_model: False
-  
-  # Model variant: 'triangular' for closed-form integration (no MC sampling needed)
-  model_variant: 'triangular'
+  # Phase schedule
+  phase1_epochs: 30      # Discovery: soft H, no STE, high tau
+  phase3_epochs: 20      # Weight refinement: structure frozen
+  # Phase 2 = epochs - phase1 - phase3 = 70 epochs (annealing)
 
-# NSTPP: Pairwise neuro-symbolic TPP (ICML'24 style)
-nstpp:
-  embed_dim: 32
-  num_heads: 3
+  # Temperature schedule
   start_tau: 5.0
   end_tau: 0.5
-  tau_anneal_rate: 0.98
-  mc_samples: 5
-  lambda_sparse: 1.0e-3
-  start_learning_rate: 5.0e-3
-  min_learning_rate: 5.0e-4
-  batch_size: 32
-  epochs: 30
-  pad_token_id: 5
-  model_save_path: './workspace/saved_models/synthetic/NSTPP'
-  top_k: 2
-  gpu: 0
-
-transformer:
-  embed_dim: 128
-  num_heads: 4
-  n_layers: 2
-  start_learning_rate: 5.0e-3
-  min_learning_rate: 1.0e-5
-  batch_size: 32
-  epochs: 30
-  pad_token_id: 5
-  transformer_save_path: './workspace/saved_models/synthetic/transformer'
-  top_k: 2
-  gpu: 1
-
-path:
-  data_path: './data/synthetic_data.pkl'
+  
+  # Theta noise (exploration → exploitation)
+  theta_noise_std_start: 0.3
+  theta_noise_std_end: 0.0
+  
+  # === Base Intensity 흡수 방지 (hard constraint 없이) ===
+  # 방법 1: Base LR을 structure의 1/10로 설정 → rule이 먼저 신호 포착
+  base_lr_mult: 0.05
+  # 방법 2: Structure LR은 약간 높여 빠른 탐색
+  structure_lr_mult: 1.5
+  # 방법 3: Responsibility penalty (base responsibility 과다 시 penalty)
+  lambda_resp_base: 0.5
+  base_resp_target: 0.3
+  use_base_hinge: true    # soft-hinge: base_resp > target일 때만 penalty
+  lambda_ent: 0.1         # Attribution entropy bonus
+  # Base intensity clamp은 사용하지 않음 (hard constraint 금지)
+  base_clamp_value: 0.0
+  base_release_epochs: 0
+  # 방법 4: 낮은 base 초기화 (관측 rate의 10% 수준)
+  init_b0: -4.0           # softplus(-4) ≈ 0.018
+  
+  # === 구조 학습 Regularization ===
+  # Orthogonality: rule 간 source mask 직교성 → 역할 분담
+  lambda_ortho: 5.0e-3
+  # Sparsity: 불필요한 source 비활성화
+  lambda_h_sparse: 1.0e-3
+  # Binary: H를 0/1로 수렴
+  lambda_h_binary: 1.0e-3
+  # Cardinality: 각 rule의 source 수 제어
+  lambda_h_card: 0.0      # 비활성 (AND rule은 다수 source 필요)
+  h_card_target: 1.0
+  # Weight sparsity
+  lambda_w_sparse: 1.0e-4
+  # Excitation/Inhibition overlap penalty
+  lambda_overlap: 5.0e-3
+  # Sign commitment
+  lambda_sign_binary: 5.0e-3
+  lambda_sign_magnitude: 1.0e-3
+  # Head (target assignment) entropy
+  lambda_head_entropy: 5.0e-3
+  lambda_head_ortho: 1.0e-3
+  # Base L1 (gentle push toward sparsity)
+  lambda_base_l1: 1.0e-4
+  # Source alpha entropy
+  lambda_alpha_entropy: 0.0
+  
+  # Sign tau
+  sign_tau: 1.0
+  
+  # Weight initialization
+  init_w_exc: -1.0
+  init_w_inh: -1.0
+  init_sign_std: 0.5
+  init_bias_raw: 0.0
+  
+  # Inhibition gradient boost
+  lambda_inh_boost: 0.1
+  inh_margin: 0.1
+  
+  # Phase 3 overrides
+  weight_lr_mult_phase3: 3.0
+  lambda_overlap_phase3: 0.0
+  
+  # Integral computation
+  integral_method: approx
+  integral_num_points: 64
+  breakpoint_chunk_size: 128
+  
+  # Max cap
+  max_cap_percentile: 0.95
+  max_cap_multiplier: 5.0
+  
+  # Data-driven initialization
+  warmstart_from_data: true
+  # Hierarchical z-score (pairwise 한계 극복)
+  use_hierarchical_zscore: true
+  zscore_max_sources: 4      # AND rule 최대 source 수
+  zscore_topk_candidates: 20 # 후보 interaction 상위 k개
+  
+  # Save settings
+  model_save_path: ./workspace/saved_models/synthetic/HNSTPP_refactored
