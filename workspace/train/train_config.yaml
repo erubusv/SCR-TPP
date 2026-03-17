@@ -1,104 +1,63 @@
 hnstpp:
   # GPU
   gpu: 0
-  
-  # Model architecture
-  num_rules: 12          # Ground truth=6, 여유 2배로 할당 → sparsity로 pruning
-  num_components: 3      # Triangular kernel mixture components
-  
-  # Training schedule
-  epochs: 120            # Phase 1 + Phase 2 + Phase 3
+
+  # Architecture
+  num_rules: 12
+  num_bins: 20            # M: piecewise-linear kernel grid divisions
+
+  # Training
+  epochs: 100
   batch_size: 64
   learning_rate: 3.0e-3
   weight_decay: 1.0e-4
   grad_clip: 5.0
 
-  # Phase schedule
-  phase1_epochs: 30      # Discovery: soft H, no STE, high tau
-  phase3_epochs: 20      # Weight refinement: structure frozen
-  # Phase 2 = epochs - phase1 - phase3 = 70 epochs (annealing)
-
-  # Temperature schedule
+  # Temperature annealing
   start_tau: 5.0
   end_tau: 0.5
-  
-  # Theta noise (exploration → exploitation)
-  theta_noise_std_start: 0.3
-  theta_noise_std_end: 0.0
-  
-  # === Base Intensity 흡수 방지 (hard constraint 없이) ===
-  # 방법 1: Base LR을 structure의 1/10로 설정 → rule이 먼저 신호 포착
-  base_lr_mult: 0.05
-  # 방법 2: Structure LR은 약간 높여 빠른 탐색
-  structure_lr_mult: 1.5
-  # 방법 3: Responsibility penalty (base responsibility 과다 시 penalty)
-  lambda_resp_base: 0.5
-  base_resp_target: 0.3
-  use_base_hinge: true    # soft-hinge: base_resp > target일 때만 penalty
-  lambda_ent: 0.1         # Attribution entropy bonus
-  # Base intensity clamp은 사용하지 않음 (hard constraint 금지)
-  base_clamp_value: 0.0
-  base_release_epochs: 0
-  # 방법 4: 낮은 base 초기화 (관측 rate의 10% 수준)
-  init_b0: -4.0           # softplus(-4) ≈ 0.018
-  
-  # === 구조 학습 Regularization ===
-  # Orthogonality: rule 간 source mask 직교성 → 역할 분담
-  lambda_ortho: 5.0e-3
-  # Sparsity: 불필요한 source 비활성화
-  lambda_h_sparse: 1.0e-3
-  # Binary: H를 0/1로 수렴
-  lambda_h_binary: 1.0e-3
-  # Cardinality: 각 rule의 source 수 제어
-  lambda_h_card: 0.0      # 비활성 (AND rule은 다수 source 필요)
-  h_card_target: 1.0
-  # Weight sparsity
-  lambda_w_sparse: 1.0e-4
-  # Excitation/Inhibition overlap penalty
-  lambda_overlap: 5.0e-3
-  # Sign commitment
-  lambda_sign_binary: 5.0e-3
-  lambda_sign_magnitude: 1.0e-3
-  # Head (target assignment) entropy
-  lambda_head_entropy: 5.0e-3
-  lambda_head_ortho: 1.0e-3
-  # Base L1 (gentle push toward sparsity)
-  lambda_base_l1: 1.0e-4
-  # Source alpha entropy
-  lambda_alpha_entropy: 0.0
-  
-  # Sign tau
-  sign_tau: 1.0
-  
-  # Weight initialization
+
+  # Wiener-Hopf initialisation
+  wh_delta_t: 0.1            # cross-covariance time resolution
+  wh_max_lag: 10.0           # max lag for Wiener-Hopf
+  wh_nnls_alpha: 1.0e-3      # L1 penalty for Joint NNLS (Phase 3)
+  wh_pair_min_support: 2
+  wh_pair_topk_per_target: 20
+  wh_max_source_order: 3
+  wh_phase3_support_tau: 20.0
+  wh_phase3_source_pool_topk: 24
+  wh_phase3_beta2: 0.5
+  wh_phase3_beta3: 1.0
+  wh_fixed_target: 12          # fixed target id for single-target WH init
+
+  # Default init (overridden by Wiener-Hopf for assigned rules)
+  init_b0: -3.0
+  init_bias_raw: 0.0
   init_w_exc: -1.0
   init_w_inh: -1.0
-  init_sign_std: 0.5
-  init_bias_raw: 0.0
-  
-  # Inhibition gradient boost
-  lambda_inh_boost: 0.1
-  inh_margin: 0.1
-  
-  # Phase 3 overrides
-  weight_lr_mult_phase3: 3.0
-  lambda_overlap_phase3: 0.0
-  
-  # Integral computation
-  integral_method: approx
+  init_sign_std: 0.0
+
+  # Integral (trapezoidal)
   integral_num_points: 64
-  breakpoint_chunk_size: 128
-  
-  # Max cap
+
+  # Max-cap (kernel support)
   max_cap_percentile: 0.95
   max_cap_multiplier: 5.0
-  
-  # Data-driven initialization
-  warmstart_from_data: true
-  # Hierarchical z-score (pairwise 한계 극복)
-  use_hierarchical_zscore: true
-  zscore_max_sources: 4      # AND rule 최대 source 수
-  zscore_topk_candidates: 20 # 후보 interaction 상위 k개
-  
-  # Save settings
-  model_save_path: ./workspace/saved_models/synthetic/HNSTPP_refactored
+
+  # Regularisation
+  lambda_ortho: 5.0e-3        # rule orthogonality
+  lambda_h_sparse: 1.0e-3     # source mask sparsity
+  lambda_h_binary: 1.0e-3     # source mask binarisation
+  lambda_w_sparse: 1.0e-4     # weight L1
+  lambda_overlap: 5.0e-3      # exc/inh overlap penalty
+  lambda_sign_binary: 5.0e-3  # sign commitment
+  lambda_head_entropy: 5.0e-3 # target assignment sharpness
+  lambda_smooth: 1.0          # kernel height smoothness
+
+  # Other
+  sign_tau: 1.0
+  epsilon: 1.0e-6
+  i_max: 20.0
+
+  # Save
+  model_save_path: ./workspace/saved_models/HNSTPP
