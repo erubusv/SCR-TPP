@@ -484,54 +484,76 @@ def phase4_build_components(
     *,
     max_source_order: int = 3,
 ) -> dict:
-    """Assemble source components and subset basis."""
+    """Assemble overlapping family groups and a deduplicated subset basis."""
     _banner("Component Basis Phase 4: Components and Basis")
-    source_ids = [int(sd.source) for sd in source_defs]
-    idx_by_source = {s: i for i, s in enumerate(source_ids)}
-    uf = _UnionFind(len(source_ids))
-    for edge in hyperedges:
-        srcs = [int(s) for s in edge["sources"]]
-        for a, b in combinations(srcs, 2):
-            uf.union(idx_by_source[a], idx_by_source[b])
-
-    comps: dict[int, list[int]] = {}
-    for src in source_ids:
-        root = uf.find(idx_by_source[src])
-        comps.setdefault(root, []).append(int(src))
-    components = sorted([tuple(sorted(v)) for v in comps.values()], key=lambda x: (len(x), x))
-
+    source_ids = sorted(int(sd.source) for sd in source_defs)
     edge_map = {
         tuple(sorted(int(s) for s in edge["sources"])): edge
         for edge in hyperedges
     }
-    atoms: list[AtomDef] = []
-    atom_id = 0
-    for comp_id, comp in enumerate(components):
-        for order in range(1, min(max_source_order, len(comp)) + 1):
-            for srcs in combinations(comp, order):
-                edge = edge_map.get(tuple(int(s) for s in srcs))
-                if order == 1:
-                    score = 0.0
-                    sign = 0
-                else:
-                    score = float(edge["score"]) if edge is not None else 0.0
-                    sign = int(edge["sign"]) if edge is not None else 0
-                atoms.append(
-                    AtomDef(
-                        atom_id=atom_id,
-                        component_id=comp_id,
-                        sources=tuple(int(s) for s in srcs),
-                        order=int(order),
-                        score=score,
-                        sign=sign,
-                    )
-                )
-                atom_id += 1
 
-    print("  Components:", components)
+    families = sorted(edge_map.keys(), key=lambda x: (len(x), x))
+    covered = set()
+    for fam in families:
+        covered.update(int(s) for s in fam)
+    # Keep singleton fallback families only for uncovered sources.
+    for src in source_ids:
+        if src not in covered:
+            families.append((int(src),))
+    families = sorted(set(families), key=lambda x: (len(x), x))
+
+    atoms: list[AtomDef] = []
+    atom_by_sources: dict[tuple[int, ...], int] = {}
+    groups: list[dict] = []
+
+    # Always keep singleton atoms available, even if they appear in multiple families.
+    for src in source_ids:
+        key = (int(src),)
+        atom_id = len(atoms)
+        atom_by_sources[key] = atom_id
+        atoms.append(
+            AtomDef(
+                atom_id=atom_id,
+                component_id=-1,
+                sources=key,
+                order=1,
+                score=0.0,
+                sign=0,
+            )
+        )
+
+    for family_id, family in enumerate(families):
+        group_atom_ids: list[int] = []
+        for order in range(1, min(max_source_order, len(family)) + 1):
+            for srcs in combinations(family, order):
+                key = tuple(sorted(int(s) for s in srcs))
+                atom_id = atom_by_sources.get(key)
+                if atom_id is None:
+                    edge = edge_map.get(key)
+                    atom_id = len(atoms)
+                    atom_by_sources[key] = atom_id
+                    atoms.append(
+                        AtomDef(
+                            atom_id=atom_id,
+                            component_id=family_id,
+                            sources=key,
+                            order=int(order),
+                            score=float(edge["score"]) if edge is not None else 0.0,
+                            sign=int(edge["sign"]) if edge is not None else 0,
+                        )
+                    )
+                group_atom_ids.append(atom_id)
+        groups.append({
+            "family_id": int(family_id),
+            "sources": tuple(int(s) for s in family),
+            "atom_ids": tuple(sorted(set(int(i) for i in group_atom_ids))),
+        })
+
+    print("  Families:", [g["sources"] for g in groups])
     print(f"  Total atoms: {len(atoms)}")
     return {
-        "components": components,
+        "components": families,
+        "groups": groups,
         "atoms": atoms,
     }
 
@@ -587,7 +609,7 @@ def phase5_fit_component_basis(
     """Target-specific sparse fit on the subset basis."""
     _banner("Component Basis Phase 5: Sparse Component Fit")
     atoms = components_state["atoms"]
-    components = components_state["components"]
+    groups = components_state["groups"]
     p_event_np, p_grid_np = _build_atom_cache(train_cache, source_defs, atoms)
     vp_event_np, vp_grid_np = _build_atom_cache(val_cache, source_defs, atoms)
 
@@ -633,10 +655,17 @@ def phase5_fit_component_basis(
     w_inh = torch.nn.Parameter(torch.as_tensor(init_wi, dtype=torch.float32, device=device))
     opt = torch.optim.Adam([w_exc, w_inh], lr=lr)
 
-    comp_to_atoms = []
-    for comp_id in range(len(components)):
-        idxs = [atom.atom_id for atom in atoms if int(atom.component_id) == comp_id]
-        comp_to_atoms.append(torch.as_tensor(idxs, dtype=torch.long, device=device))
+    atom_membership = np.zeros((len(atoms),), dtype=np.float32)
+    for group in groups:
+        for atom_id in group["atom_ids"]:
+            atom_membership[int(atom_id)] += 1.0
+    atom_membership = np.maximum(atom_membership, 1.0)
+
+    group_to_atoms = [
+        torch.as_tensor(group["atom_ids"], dtype=torch.long, device=device)
+        for group in groups
+    ]
+    atom_membership_t = torch.as_tensor(atom_membership, dtype=torch.float32, device=device)
 
     order_pen = torch.as_tensor(
         [1.0 if atom.order == 1 else (1.15 if atom.order == 2 else 1.35) for atom in atoms],
@@ -644,21 +673,52 @@ def phase5_fit_component_basis(
         device=device,
     )
 
+    atom_support = np.maximum(p_event_np.sum(axis=0).astype(np.float32), 1e-6)
+    proxy_pairs: list[tuple[int, int, float]] = []
+    seen_proxy_pairs: set[tuple[int, int]] = set()
+    atom_sources = [tuple(int(s) for s in atom.sources) for atom in atoms]
+    for group in groups:
+        group_atom_ids = tuple(int(i) for i in group["atom_ids"])
+        for parent_id in group_atom_ids:
+            parent_sources = set(atom_sources[parent_id])
+            for child_id in group_atom_ids:
+                if parent_id == child_id:
+                    continue
+                child_sources = set(atom_sources[child_id])
+                if len(parent_sources) >= len(child_sources) or not parent_sources.issubset(child_sources):
+                    continue
+                key = (int(parent_id), int(child_id))
+                if key in seen_proxy_pairs:
+                    continue
+                seen_proxy_pairs.add(key)
+                overlap = float(atom_support[child_id] / max(atom_support[parent_id], 1e-6))
+                overlap = float(np.clip(overlap, 0.0, 1.0))
+                if overlap > 1e-4:
+                    proxy_pairs.append((int(parent_id), int(child_id), overlap))
+
     best = None
     best_val = None
     for step in range(max(steps, 0)):
         opt.zero_grad()
         nll = _target_cached_nll(w_exc, w_inh, p_event, p_grid, y_event, base_tgt, grid_w)
         comp_pen = torch.tensor(0.0, dtype=torch.float32, device=device)
-        for idxs in comp_to_atoms:
-            v = torch.cat([w_exc[idxs], w_inh[idxs]], dim=0)
+        for idxs in group_to_atoms:
+            scale = torch.sqrt(atom_membership_t[idxs])
+            v = torch.cat([w_exc[idxs] / scale, w_inh[idxs] / scale], dim=0)
             comp_pen = comp_pen + torch.sqrt((v * v).sum() + 1e-8)
         atom_pen = torch.sqrt(w_exc * w_exc + w_inh * w_inh + 1e-8)
+        proxy_pen = torch.tensor(0.0, dtype=torch.float32, device=device)
+        for parent_id, child_id, overlap in proxy_pairs:
+            coeff = float(overlap)
+            proxy_pen = proxy_pen + coeff * (
+                w_exc[parent_id] * w_exc[child_id] + w_inh[parent_id] * w_inh[child_id]
+            )
         loss = (
             nll
             + float(lambda_comp) * comp_pen
             + float(lambda_atom) * (order_pen * atom_pen).sum()
             + float(lambda_overlap) * (w_exc * w_inh).sum()
+            + 5e-4 * proxy_pen
         )
         loss.backward()
         opt.step()
@@ -684,7 +744,8 @@ def phase5_fit_component_basis(
         "w_exc": best[0].detach().cpu().numpy(),
         "w_inh": best[1].detach().cpu().numpy(),
         "atoms": atoms,
-        "components": components,
+        "components": components_state["components"],
+        "groups": groups,
         "source_defs": source_defs,
         "base_rates": base_rates,
         "fixed_target": int(fixed_target),

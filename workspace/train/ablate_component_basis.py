@@ -67,6 +67,31 @@ def gt_rules_from_config(config: dict):
     return gt
 
 
+def node_label(node: int, fixed_target: int) -> str:
+    if int(node) == int(fixed_target):
+        return "T"
+    if 0 <= int(node) < 26:
+        return chr(ord("A") + int(node))
+    return f"S{int(node)}"
+
+
+def format_rule(rule, fixed_target: int) -> str:
+    srcs, sign, target = rule
+    lhs = " and ".join(node_label(int(s), fixed_target) for s in srcs)
+    rhs = node_label(int(target), fixed_target)
+    sign_txt = "excitation" if sign == "exc" else "inhibition"
+    return f"{lhs} -> {rhs} : {sign_txt}"
+
+
+def print_rule_block(title: str, rules, fixed_target: int):
+    print(title)
+    if not rules:
+        print("  - none")
+        return
+    for rule in rules:
+        print(f"  - {format_rule(rule, fixed_target)}")
+
+
 def predict_rules(model: HNSTPPComponentBasis, threshold: float = 1e-3):
     st = model.get_structure()
     atom_sources = st["atom_sources"].numpy().astype(int)
@@ -178,6 +203,12 @@ def main():
     hit = sorted(gt & preds)
     miss = sorted(gt - preds)
     extra = sorted(preds - gt)
+
+    print("===RULE REPORT===")
+    print_rule_block("True rules:", sorted(gt), int(args.fixed_target))
+    print_rule_block("Matched rules:", hit, int(args.fixed_target))
+    print_rule_block("Missing rules:", miss, int(args.fixed_target))
+    print_rule_block("Extra predicted rules:", extra, int(args.fixed_target))
 
     out = {
         "elapsed_sec": elapsed,
