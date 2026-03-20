@@ -1,0 +1,121 @@
+# Custom overlap synthetic for family-hypothesis validation
+# A..F = 0..5, T = 6
+
+time_horizon: 120.0
+num_event_types: 7
+num_samples: 5000
+max_len: 256
+
+base_intensity:
+  0: 0.18
+  1: 0.18
+  2: 0.17
+  3: 0.17
+  4: 0.16
+  5: 0.16
+  6: 0.01
+
+rules:
+  - id: 0
+    target: 6
+    W_pos: 1.8
+    W_neg: 0.0
+    bias: 0.0
+    condition:
+      0:
+        peaks: [0.8]
+        widths: [2.4]
+        mix_weights: [1.0]
+
+  - id: 1
+    target: 6
+    W_pos: 1.8
+    W_neg: 0.0
+    bias: 0.0
+    condition:
+      1:
+        peaks: [0.8]
+        widths: [2.4]
+        mix_weights: [1.0]
+
+  - id: 2
+    target: 6
+    W_pos: 0.0
+    W_neg: 3.6
+    bias: 0.80
+    condition:
+      0:
+        peaks: [1.0]
+        widths: [3.2]
+        mix_weights: [1.0]
+      1:
+        peaks: [1.0]
+        widths: [3.2]
+        mix_weights: [1.0]
+
+  - id: 3
+    target: 6
+    W_pos: 0.0
+    W_neg: 1.8
+    bias: 0.0
+    condition:
+      2:
+        peaks: [0.8]
+        widths: [2.4]
+        mix_weights: [1.0]
+
+  - id: 4
+    target: 6
+    W_pos: 4.0
+    W_neg: 0.0
+    bias: 0.80
+    condition:
+      2:
+        peaks: [1.0]
+        widths: [3.2]
+        mix_weights: [1.0]
+      3:
+        peaks: [1.0]
+        widths: [3.2]
+        mix_weights: [1.0]
+
+  - id: 5
+    target: 6
+    W_pos: 0.0
+    W_neg: 2.8
+    bias: 1.45
+    condition:
+      0:
+        peaks: [1.2]
+        widths: [4.0]
+        mix_weights: [1.0]
+      4:
+        peaks: [1.2]
+        widths: [4.0]
+        mix_weights: [1.0]
+      5:
+        peaks: [1.2]
+        widths: [4.0]
+        mix_weights: [1.0]
+
+  - id: 6
+    target: 6
+    W_pos: 3.0
+    W_neg: 0.0
+    bias: 1.45
+    condition:
+      1:
+        peaks: [1.2]
+        widths: [4.0]
+        mix_weights: [1.0]
+      4:
+        peaks: [1.2]
+        widths: [4.0]
+        mix_weights: [1.0]
+      5:
+        peaks: [1.2]
+        widths: [4.0]
+        mix_weights: [1.0]
+
+path:
+  output_path: /workspace/data/synthetic_custom_overlap.pkl

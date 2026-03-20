@@ -54,6 +54,36 @@ class HNSTPP(BaseTPP):
         # --- Base intensity ---
         self.b0 = nn.Parameter(torch.full((K,), float(config.get('init_b0', -3.0))))
 
+        # Runtime-only inhibition family hypotheses.
+        self.register_buffer('family_hyp_active', torch.zeros(R, dtype=torch.float32))
+        self.register_buffer('family_hyp_target', torch.full((R,), -1, dtype=torch.long))
+        self.register_buffer('family_hyp_order', torch.zeros(R, dtype=torch.long))
+        self.register_buffer('family_hyp_mode', torch.full((R,), -1, dtype=torch.long))  # 0=proxy, 1=exclusive
+        self.register_buffer('family_hyp_sources', torch.full((R, 3), -1, dtype=torch.long))
+        self.register_buffer('family_hyp_weight', torch.zeros(R, 7, dtype=torch.float32))
+
+    def clear_family_hypotheses(self):
+        self.family_hyp_active.zero_()
+        self.family_hyp_target.fill_(-1)
+        self.family_hyp_order.zero_()
+        self.family_hyp_mode.fill_(-1)
+        self.family_hyp_sources.fill_(-1)
+        self.family_hyp_weight.zero_()
+    def register_family_hypothesis(self, slot: int, target: int, sources, mode: int, weights):
+        srcs = tuple(int(s) for s in sources)
+        if len(srcs) not in (2, 3):
+            raise ValueError("family hypothesis expects order 2 or 3")
+        self.family_hyp_active[slot] = 1.0
+        self.family_hyp_target[slot] = int(target)
+        self.family_hyp_order[slot] = len(srcs)
+        self.family_hyp_mode[slot] = int(mode)
+        self.family_hyp_sources[slot].fill_(-1)
+        for i, s in enumerate(srcs):
+            self.family_hyp_sources[slot, i] = int(s)
+        w = torch.as_tensor(weights, dtype=self.family_hyp_weight.dtype, device=self.family_hyp_weight.device)
+        self.family_hyp_weight[slot].zero_()
+        self.family_hyp_weight[slot, : w.numel()] = w
+
     def set_max_cap(self, time_diffs: torch.Tensor, event_types: torch.Tensor):
         """Compute and set ``max_cap`` from a batch of time-difference data.
 
@@ -202,6 +232,65 @@ class HNSTPP(BaseTPP):
         h_mask = H[types].permute(2, 0, 1).unsqueeze(2)            # (R, B, 1, L)
         return (kv * h_mask).sum(dim=-1).permute(1, 2, 0)          # (B, Q, R)
 
+    def _compute_source_signal(self, eval_times, event_times, event_types, model_output, src_idx: int, slot: int):
+        heights = model_output['kernel_heights'][slot:slot + 1]
+        valid = (event_types != self.pad_token_id)
+        src_mask = (event_types == int(src_idx)) & valid
+        dt = eval_times.unsqueeze(2) - event_times.unsqueeze(1)
+        causal = src_mask.unsqueeze(1) & (dt > 0) & (dt <= self.max_cap)
+        kv = self._eval_kernel(dt, heights)[0]
+        return (kv * causal.float()).sum(dim=-1)
+
+    def _compute_family_hyp_inh(self, eval_times, event_times, event_types, model_output):
+        active_slots = torch.nonzero(self.family_hyp_active > 0.5, as_tuple=False).squeeze(1)
+        if active_slots.numel() == 0:
+            return eval_times.new_zeros((*eval_times.shape, self.num_types))
+
+        corr = eval_times.new_zeros((*eval_times.shape, self.num_types))
+        single_bias = 0.25
+
+        for slot_t in active_slots.tolist():
+            tgt = int(self.family_hyp_target[slot_t].item())
+            order = int(self.family_hyp_order[slot_t].item())
+            mode = int(self.family_hyp_mode[slot_t].item())
+            srcs = [int(x) for x in self.family_hyp_sources[slot_t].tolist() if int(x) >= 0]
+            if tgt < 0 or order not in (2, 3) or len(srcs) != order:
+                continue
+
+            ps = [
+                F.relu(self._compute_source_signal(eval_times, event_times, event_types, model_output, src, slot_t) - single_bias)
+                for src in srcs
+            ]
+            w = self.family_hyp_weight[slot_t]
+
+            if order == 2:
+                pa, pb = ps
+                if mode == 0:
+                    phi = w[0] * pa + w[1] * pb
+                else:
+                    ab = torch.minimum(pa, pb)
+                    a_only = F.relu(pa - pb)
+                    b_only = F.relu(pb - pa)
+                    phi = w[0] * a_only + w[1] * b_only + w[2] * ab
+            else:
+                pa, pb, pc = ps
+                if mode == 0:
+                    phi = w[0] * pa + w[1] * pb + w[2] * pc
+                else:
+                    abc = torch.minimum(torch.minimum(pa, pb), pc)
+                    ab = F.relu(torch.minimum(pa, pb) - pc)
+                    ac = F.relu(torch.minimum(pa, pc) - pb)
+                    bc = F.relu(torch.minimum(pb, pc) - pa)
+                    a_only = F.relu(pa - torch.maximum(pb, pc))
+                    b_only = F.relu(pb - torch.maximum(pa, pc))
+                    c_only = F.relu(pc - torch.maximum(pa, pb))
+                    phi = (
+                        w[0] * a_only + w[1] * b_only + w[2] * c_only +
+                        w[3] * ab + w[4] * ac + w[5] * bc + w[6] * abc
+                    )
+            corr[..., tgt] += phi
+        return corr
+
 
     def _compute_exc_inh(self, p_r, model_output):
         E_k = torch.matmul(p_r * model_output['W_pos'], model_output['Head'])
@@ -215,6 +304,7 @@ class HNSTPP(BaseTPP):
                                  model_output)
         p_r = F.relu(S - model_output['rule_bias'])
         E_k, I_k = self._compute_exc_inh(p_r, model_output)
+        I_k = I_k + self._compute_family_hyp_inh(eval_times, event_times, event_types, model_output)
         I_k = I_k.clamp(0, self.i_max)
         return (model_output['b_k'] + E_k) * torch.exp(-I_k) + self.eps
     
@@ -259,17 +349,10 @@ class HNSTPP(BaseTPP):
         t_end = self._get_sequence_end(times, input_ids)
         t_start = torch.zeros_like(t_end)
 
-        # Event log-likelihood
-        S = self._compute_signal_at_events(times, input_ids, model_output)
-        p_r = F.relu(S - model_output['rule_bias'])
-        E_k, I_k = self._compute_exc_inh(p_r, model_output)
-
+        # Event path shares the same intensity semantics as runtime.
+        lam_all = self.compute_intensity(times, times, input_ids, model_output)
         safe_ids = input_ids.clamp(0, self.num_types - 1)
-        E_tgt = E_k.gather(2, safe_ids.unsqueeze(-1)).squeeze(-1)
-        I_tgt = I_k.gather(2, safe_ids.unsqueeze(-1)).squeeze(-1).clamp(0, self.i_max)
-        b_tgt = model_output['b_k'][safe_ids]
-
-        lam_tgt = (b_tgt + E_tgt) * torch.exp(-I_tgt) + self.eps
+        lam_tgt = lam_all.gather(2, safe_ids.unsqueeze(-1)).squeeze(-1)
         event_ll = (torch.log(lam_tgt) * mask).sum()
 
         # Integral
@@ -344,4 +427,10 @@ class HNSTPP(BaseTPP):
                 'kernel_heights': mo['kernel_heights'].cpu(),
                 'b_k': mo['b_k'].cpu(),
                 'rule_bias': mo['rule_bias'].cpu(),
+                'family_hyp_active': (self.family_hyp_active > 0.5).cpu(),
+                'family_hyp_target': self.family_hyp_target.cpu(),
+                'family_hyp_order': self.family_hyp_order.cpu(),
+                'family_hyp_mode': self.family_hyp_mode.cpu(),
+                'family_hyp_sources': self.family_hyp_sources.cpu(),
+                'family_hyp_weight': self.family_hyp_weight.cpu(),
             }

@@ -54,7 +54,10 @@ def wiener_hopf_initialize(
     phase3_beta2: float = 0.5,
     phase3_beta3: float = 1.0,
     int_grid_mult: int = 3,
+    phase4_source_cap: float | None = None,
     exc_prefit_steps: int = 40,
+    phase6_protect_best_inh_single: bool = True,
+    phase6_family_conflict_penalty: float = 0.35,
     fixed_target: int | None = None,
 ) -> None:
     """Run the full 6-phase deterministic initialisation.
@@ -162,11 +165,13 @@ def wiener_hopf_initialize(
     # Phase 4 ── Feature Caching ─────────────────────────────────────
     P_event, P_int, meta = _phase4_cache_features(
         candidates, train_data, D, model, device, int_grid_mult,
+        source_cap=phase4_source_cap,
     )
     val_cache = None
     if len(val_data) > 0:
         Pv_event, Pv_int, meta_v = _phase4_cache_features(
             candidates, val_data, D, model, device, int_grid_mult=2,
+            source_cap=phase4_source_cap,
         )
         val_cache = {
             'P_event': Pv_event,
@@ -193,6 +198,9 @@ def wiener_hopf_initialize(
         refit_steps=refit_steps, refit_lr=fista_lr,
         prune=prune,
         val_cache=val_cache,
+        phase5_family_state=None,
+        protect_best_inh_single=phase6_protect_best_inh_single,
+        family_conflict_penalty=phase6_family_conflict_penalty,
         fixed_target=fixed_target,
     )
 
@@ -1057,6 +1065,7 @@ def _mine_higher_order_rows(
 
 def _phase4_cache_features(
     candidates, data_list, D, model, device, int_grid_mult=3,
+    source_cap: float | None = None,
 ):
     """Pre-compute P_event [N, K] and P_int [M_grid, K].
 
@@ -1072,6 +1081,8 @@ def _phase4_cache_features(
     """
     print("\n[Phase 4] Dual-track feature caching")
     K_cand = len(candidates)
+    if source_cap is not None:
+        source_cap = float(max(source_cap, 0.0))
 
     # ── Collect all events into flat arrays ─────────────────────
     all_times: list[np.ndarray] = []
@@ -1215,6 +1226,9 @@ def _phase4_cache_features(
                         kk[valid], weights=kvals[valid], minlength=D
                     )[:D]
 
+        if source_cap is not None:
+            np.minimum(S_src_ev, source_cap, out=S_src_ev)
+
         # Project source features to candidate features
         S_rule_ev = S_src_ev @ src_mask_mat                           # (n_ev, K)
         P_event_np[ev_idx] = np.maximum(S_rule_ev - biases[None, :], 0.0)
@@ -1241,6 +1255,9 @@ def _phase4_cache_features(
                 S_src_gr[g] = np.bincount(
                     kk[valid], weights=kvals[valid], minlength=D
                 )[:D]
+
+        if source_cap is not None:
+            np.minimum(S_src_gr, source_cap, out=S_src_gr)
 
         S_rule_gr = S_src_gr @ src_mask_mat                           # (n_gr, K)
         P_int_np[gr_idx] = np.maximum(S_rule_gr - biases[None, :], 0.0)
@@ -1473,6 +1490,165 @@ def _fit_cached_subset(
             wi.clamp_(min=0.0)
 
     return we.detach(), wi.detach()
+
+
+def _candidate_sign_pref(cand: dict) -> int:
+    if 'lor_sign' in cand:
+        return int(cand['lor_sign'])
+    we = float(cand.get('w_exc_init', 0.0))
+    wi = float(cand.get('w_inh_init', 0.0))
+    if wi > we:
+        return -1
+    if we > wi:
+        return 1
+    return 0
+
+
+def _build_inh_family_specs(candidates: list[dict], *, fixed_target: int | None = None) -> list[dict]:
+    idx_by = {
+        (int(c['target']), tuple(int(s) for s in c['sources'])): i
+        for i, c in enumerate(candidates)
+    }
+    specs = []
+    for fam_idx, cand in enumerate(candidates):
+        srcs = tuple(int(s) for s in cand['sources'])
+        order = len(srcs)
+        if order not in (2, 3):
+            continue
+        if fixed_target is not None and int(cand['target']) != int(fixed_target):
+            continue
+        if _candidate_sign_pref(cand) >= 0:
+            continue
+        single_idx = []
+        ok = True
+        for s in srcs:
+            key = (int(cand['target']), (int(s),))
+            if key not in idx_by:
+                ok = False
+                break
+            single_idx.append(idx_by[key])
+        if not ok:
+            continue
+        spec = {
+            'family_idx': fam_idx,
+            'target': int(cand['target']),
+            'sources': srcs,
+            'order': order,
+            'single_idx': tuple(single_idx),
+            'cand_score_raw': float(cand.get('score_raw', 0.0)),
+            'support_x1': float(cand.get('support_x1', 0.0)),
+        }
+        specs.append(spec)
+    return specs
+
+
+def _build_family_proxy_and_atoms(
+    P_event: torch.Tensor,
+    P_int: torch.Tensor,
+    single_idx: tuple[int, ...],
+):
+    pev = [P_event[:, idx] for idx in single_idx]
+    pin = [P_int[:, idx] for idx in single_idx]
+    order = len(single_idx)
+    if order == 2:
+        pa_ev, pb_ev = pev
+        pa_in, pb_in = pin
+        proxy_ev = torch.stack([pa_ev, pb_ev], dim=1)
+        proxy_in = torch.stack([pa_in, pb_in], dim=1)
+        ab_ev = torch.minimum(pa_ev, pb_ev)
+        ab_in = torch.minimum(pa_in, pb_in)
+        a_only_ev = torch.relu(pa_ev - pb_ev)
+        b_only_ev = torch.relu(pb_ev - pa_ev)
+        a_only_in = torch.relu(pa_in - pb_in)
+        b_only_in = torch.relu(pb_in - pa_in)
+        excl_ev = torch.stack([a_only_ev, b_only_ev, ab_ev], dim=1)
+        excl_in = torch.stack([a_only_in, b_only_in, ab_in], dim=1)
+    else:
+        pa_ev, pb_ev, pc_ev = pev
+        pa_in, pb_in, pc_in = pin
+        proxy_ev = torch.stack([pa_ev, pb_ev, pc_ev], dim=1)
+        proxy_in = torch.stack([pa_in, pb_in, pc_in], dim=1)
+        abc_ev = torch.minimum(torch.minimum(pa_ev, pb_ev), pc_ev)
+        ab_ev = torch.relu(torch.minimum(pa_ev, pb_ev) - pc_ev)
+        ac_ev = torch.relu(torch.minimum(pa_ev, pc_ev) - pb_ev)
+        bc_ev = torch.relu(torch.minimum(pb_ev, pc_ev) - pa_ev)
+        a_only_ev = torch.relu(pa_ev - torch.maximum(pb_ev, pc_ev))
+        b_only_ev = torch.relu(pb_ev - torch.maximum(pa_ev, pc_ev))
+        c_only_ev = torch.relu(pc_ev - torch.maximum(pa_ev, pb_ev))
+        abc_in = torch.minimum(torch.minimum(pa_in, pb_in), pc_in)
+        ab_in = torch.relu(torch.minimum(pa_in, pb_in) - pc_in)
+        ac_in = torch.relu(torch.minimum(pa_in, pc_in) - pb_in)
+        bc_in = torch.relu(torch.minimum(pb_in, pc_in) - pa_in)
+        a_only_in = torch.relu(pa_in - torch.maximum(pb_in, pc_in))
+        b_only_in = torch.relu(pb_in - torch.maximum(pa_in, pc_in))
+        c_only_in = torch.relu(pc_in - torch.maximum(pa_in, pb_in))
+        excl_ev = torch.stack([a_only_ev, b_only_ev, c_only_ev, ab_ev, ac_ev, bc_ev, abc_ev], dim=1)
+        excl_in = torch.stack([a_only_in, b_only_in, c_only_in, ab_in, ac_in, bc_in, abc_in], dim=1)
+    return proxy_ev, proxy_in, excl_ev, excl_in
+
+
+def _target_nll_from_terms(E_ev_t, I_ev_t, E_in_t, I_in_t, event_mask_t, b_tgt, grid_wts):
+    lam_ev_t = (b_tgt + E_ev_t).clamp(min=1e-8) * torch.exp(I_ev_t.neg().clamp(min=-20.0, max=20.0))
+    log_ll = (torch.log(lam_ev_t.clamp(min=1e-8)) * event_mask_t).sum()
+    lam_in_t = (b_tgt + E_in_t).clamp(min=0.0) * torch.exp(I_in_t.neg().clamp(min=-20.0, max=20.0))
+    integral = (lam_in_t * grid_wts).sum()
+    n_events_t = max(float(event_mask_t.sum().item()), 1.0)
+    return (-log_ll + integral) / n_events_t
+
+
+def _fit_nonneg_family_weights(P_ev_atoms, P_in_atoms, E_base_ev, I_base_ev, E_base_in, I_base_in, event_mask_t, b_tgt, grid_wts, *, steps=120, lr=5e-2):
+    w = torch.zeros((P_ev_atoms.shape[1],), dtype=torch.float32, device=P_ev_atoms.device, requires_grad=True)
+    opt = torch.optim.Adam([w], lr=lr)
+    for _ in range(max(steps, 0)):
+        opt.zero_grad()
+        nll = _target_nll_from_terms(
+            E_base_ev,
+            I_base_ev + torch.matmul(P_ev_atoms, w),
+            E_base_in,
+            I_base_in + torch.matmul(P_in_atoms, w),
+            event_mask_t,
+            b_tgt,
+            grid_wts,
+        )
+        nll.backward()
+        with torch.no_grad():
+            w.grad[w <= 0] = w.grad[w <= 0].clamp(max=0)
+        opt.step()
+        with torch.no_grad():
+            w.clamp_(min=0.0)
+    return w.detach()
+
+
+def _balanced_family_metric(E_base_ev, I_base_ev, E_base_in, I_base_in, add_ev, add_in, region_ev, region_in, event_mask_t, b_tgt, grid_wts):
+    E_ev = E_base_ev
+    I_ev = I_base_ev + add_ev
+    E_in = E_base_in
+    I_in = I_base_in + add_in
+    lam_ev = (b_tgt + E_ev).clamp(min=1e-8) * torch.exp(I_ev.neg().clamp(min=-20.0, max=20.0))
+    lam_in = (b_tgt + E_in).clamp(min=0.0) * torch.exp(I_in.neg().clamp(min=-20.0, max=20.0))
+    scores = []
+    for j in range(region_ev.shape[1]):
+        z_ev = region_ev[:, j] * event_mask_t
+        z_in = region_in[:, j] * grid_wts
+        mass = float(z_ev.sum().item() + z_in.sum().item())
+        if mass <= 1e-6:
+            continue
+        local = (-(z_ev * torch.log(lam_ev.clamp(min=1e-8))).sum() + (z_in * lam_in).sum()) / max(float(z_ev.sum().item()), 1.0)
+        scores.append(local)
+    if not scores:
+        return torch.tensor(float('inf'), device=E_base_ev.device)
+    return torch.stack(scores).mean()
+
+
+def _build_maximal_inh_cliques(family_specs: list[dict]) -> list[tuple[int, ...]]:
+    src_sets = sorted({tuple(int(s) for s in spec['sources']) for spec in family_specs}, key=lambda x: (len(x), x))
+    maximal = []
+    for srcs in src_sets:
+        s = set(srcs)
+        if any(s < set(other) for other in src_sets):
+            continue
+        maximal.append(srcs)
+    return maximal
 
 
 # ================================================================== #
@@ -1811,6 +1987,9 @@ def _phase6_refit_and_inject(
     refit_lr: float = 1e-2,
     prune: bool = True,
     val_cache: dict | None = None,
+    phase5_family_state: dict | None = None,
+    protect_best_inh_single: bool = True,
+    family_conflict_penalty: float = 0.35,
     fixed_target: int | None = None,
 ):
     """Step 6.1 debiased refit, 6.2 global incremental selection, 6.3 Top-R injection."""
@@ -1965,35 +2144,368 @@ def _phase6_refit_and_inject(
         cur_wi = wi_final[torch.as_tensor(selected_local, dtype=torch.long, device=device)]
         incremental_gain = [float(delta_nlls[i].item()) for i in selected_local]
 
-    top_R = min(R, len(selected_local))
+    selected_items = []
+    for rank, loc in enumerate(selected_local):
+        glob = int(alive_idx[loc].item())
+        selected_items.append({
+            'kind': 'raw',
+            'local': int(loc),
+            'global': glob,
+            'cand': candidates[glob],
+            'w_exc': float(cur_we[rank].item()),
+            'w_inh': float(cur_wi[rank].item()),
+            'gain': float(incremental_gain[rank]) if rank < len(incremental_gain) else 0.0,
+            'delta_drop': float(delta_nlls[loc].item()),
+        })
+
+    protected_pos = set(range(min(3, len(selected_items))))
+    best_inh_pos = None
+    best_inh_strength = None
+    best_inh_fallback = None
+    selected_global_to_pos = {int(item['global']): pos for pos, item in enumerate(selected_items)}
+    for loc in range(n_alive):
+        glob = int(alive_idx[loc].item())
+        cand = candidates[glob]
+        if len(cand['sources']) != 1:
+            continue
+        we_loc = float(we_final[loc].item())
+        wi_loc = float(wi_final[loc].item())
+        if wi_loc <= we_loc:
+            continue
+        strength = wi_loc - we_loc
+        if best_inh_strength is None or strength > best_inh_strength:
+            best_inh_strength = strength
+            if glob in selected_global_to_pos:
+                best_inh_pos = selected_global_to_pos[glob]
+                best_inh_fallback = None
+            else:
+                best_inh_pos = None
+                best_inh_fallback = {
+                    'kind': 'raw',
+                    'local': int(loc),
+                    'global': glob,
+                    'cand': cand,
+                    'w_exc': we_loc,
+                    'w_inh': wi_loc,
+                    'gain': 0.0,
+                    'delta_drop': float(delta_nlls[loc].item()),
+                }
+    if protect_best_inh_single and best_inh_pos is not None:
+        protected_pos.add(best_inh_pos)
+
+    protected_items = [selected_items[p] for p in sorted(protected_pos)]
+    if protect_best_inh_single and best_inh_fallback is not None:
+        protected_items.append(best_inh_fallback)
+    if phase5_family_state is not None:
+        zeroed_global = set(int(i) for i in phase5_family_state.get('zeroed_global_idx', ()))
+        if zeroed_global:
+            protected_items = [
+                item for item in protected_items
+                if not (
+                    item['kind'] == 'raw'
+                    and item['global'] in zeroed_global
+                    and item['w_inh'] > item['w_exc']
+                )
+            ]
+    num_family_slots = max(0, R - len(protected_items))
+    chosen_family_items = []
+    feasible_families = 0
+    family_items = []
+
+    if phase5_family_state is not None:
+        preselected = list(phase5_family_state.get('family_items', []))
+        if preselected:
+            used = set()
+            for item in preselected:
+                srcs = set(int(s) for s in item['sources'])
+                if used & srcs:
+                    continue
+                used |= srcs
+                chosen_family_items.append(item)
+            num_family_slots = max(0, R - len(protected_items) - len(chosen_family_items))
+
+    if fixed_target is not None and num_family_slots > 0:
+        family_specs = _build_inh_family_specs(candidates, fixed_target=fixed_target)
+        if family_specs:
+            score_by_order = {}
+            support_by_order = {}
+            for spec in family_specs:
+                score_by_order.setdefault(int(spec['order']), []).append(float(spec.get('cand_score_raw', 0.0)))
+                support_by_order.setdefault(int(spec['order']), []).append(float(np.log1p(spec.get('support_x1', 0.0))))
+            order_score_stats = {}
+            order_support_stats = {}
+            for order, vals in score_by_order.items():
+                arr = np.asarray(vals, dtype=np.float64)
+                med = float(np.median(arr)) if len(arr) else 0.0
+                mad = float(np.median(np.abs(arr - med))) if len(arr) else 0.0
+                order_score_stats[int(order)] = (med, max(1.4826 * mad, 1e-6))
+            for order, vals in support_by_order.items():
+                arr = np.asarray(vals, dtype=np.float64)
+                med = float(np.median(arr)) if len(arr) else 0.0
+                mad = float(np.median(np.abs(arr - med))) if len(arr) else 0.0
+                order_support_stats[int(order)] = (med, max(1.4826 * mad, 1e-6))
+            protected_inh_strength = {}
+            for item in protected_items:
+                if item['kind'] == 'raw' and len(item['cand']['sources']) == 1 and item['w_inh'] > item['w_exc']:
+                    s = int(item['cand']['sources'][0])
+                    protected_inh_strength[s] = float(item['w_inh'] - item['w_exc'])
+            event_mask_tr = event_oh[:, int(fixed_target)]
+            b_tgt = b[int(fixed_target)]
+
+            if (val_cache is not None
+                    and 'P_event' in val_cache
+                    and val_cache['P_event'].shape[1] == len(candidates)):
+                P_ev_v_full = val_cache['P_event']
+                P_in_v_full = val_cache['P_int']
+                event_mask_v = val_cache['meta']['event_target_oh'][:, int(fixed_target)]
+                grid_wts_v = val_cache['meta']['grid_weights']
+            else:
+                quick_full = _build_quick_cache(candidates, val_data, D, model, device)
+                P_ev_v_full = quick_full['P_event']
+                P_in_v_full = quick_full['P_int']
+                event_mask_v = quick_full['event_target_oh'][:, int(fixed_target)]
+                grid_wts_v = quick_full['grid_weights']
+
+            def _add_family_base(item, E_base_ev_tr, I_base_ev_tr, E_base_in_tr, I_base_in_tr,
+                                 E_base_ev_v, I_base_ev_v, E_base_in_v, I_base_in_v):
+                srcs = tuple(int(s) for s in item['sources'])
+                single_idx_local = tuple(
+                    idx for idx in (
+                        next(
+                            i for i, c in enumerate(candidates)
+                            if int(c['target']) == int(item['target'])
+                            and tuple(int(x) for x in c['sources']) == (int(s),)
+                        )
+                        for s in srcs
+                    )
+                )
+                proxy_ev_tr, proxy_in_tr, excl_ev_tr, excl_in_tr = _build_family_proxy_and_atoms(
+                    P_event, P_int, single_idx_local
+                )
+                proxy_ev_v, proxy_in_v, excl_ev_v, excl_in_v = _build_family_proxy_and_atoms(
+                    P_ev_v_full, P_in_v_full, single_idx_local
+                )
+                if int(item['mode']) == 0:
+                    add_ev_tr = torch.matmul(proxy_ev_tr, item['weights'])
+                    add_in_tr = torch.matmul(proxy_in_tr, item['weights'])
+                    add_ev_v = torch.matmul(proxy_ev_v, item['weights'])
+                    add_in_v = torch.matmul(proxy_in_v, item['weights'])
+                else:
+                    add_ev_tr = torch.matmul(excl_ev_tr, item['weights'])
+                    add_in_tr = torch.matmul(excl_in_tr, item['weights'])
+                    add_ev_v = torch.matmul(excl_ev_v, item['weights'])
+                    add_in_v = torch.matmul(excl_in_v, item['weights'])
+                return (
+                    E_base_ev_tr,
+                    I_base_ev_tr + add_ev_tr,
+                    E_base_in_tr,
+                    I_base_in_tr + add_in_tr,
+                    E_base_ev_v,
+                    I_base_ev_v + add_ev_v,
+                    E_base_in_v,
+                    I_base_in_v + add_in_v,
+                )
+
+            used_src = set()
+            for item in chosen_family_items:
+                used_src |= set(int(s) for s in item['sources'])
+
+            while len(chosen_family_items) < num_family_slots:
+                family_items = []
+                E_base_ev_tr = torch.zeros_like(event_mask_tr)
+                I_base_ev_tr = torch.zeros_like(event_mask_tr)
+                E_base_in_tr = torch.zeros_like(grid_wts)
+                I_base_in_tr = torch.zeros_like(grid_wts)
+                E_base_ev_v = torch.zeros_like(event_mask_v)
+                I_base_ev_v = torch.zeros_like(event_mask_v)
+                E_base_in_v = torch.zeros_like(grid_wts_v)
+                I_base_in_v = torch.zeros_like(grid_wts_v)
+
+                for item in protected_items:
+                    loc = item['local']
+                    E_base_ev_tr = E_base_ev_tr + P_ev_sub[:, loc] * item['w_exc']
+                    I_base_ev_tr = I_base_ev_tr + P_ev_sub[:, loc] * item['w_inh']
+                    E_base_in_tr = E_base_in_tr + P_in_sub[:, loc] * item['w_exc']
+                    I_base_in_tr = I_base_in_tr + P_in_sub[:, loc] * item['w_inh']
+                    E_base_ev_v = E_base_ev_v + P_ev_v[:, loc] * item['w_exc']
+                    I_base_ev_v = I_base_ev_v + P_ev_v[:, loc] * item['w_inh']
+                    E_base_in_v = E_base_in_v + P_in_v[:, loc] * item['w_exc']
+                    I_base_in_v = I_base_in_v + P_in_v[:, loc] * item['w_inh']
+
+                for item in chosen_family_items:
+                    (
+                        E_base_ev_tr, I_base_ev_tr, E_base_in_tr, I_base_in_tr,
+                        E_base_ev_v, I_base_ev_v, E_base_in_v, I_base_in_v,
+                    ) = _add_family_base(
+                        item,
+                        E_base_ev_tr, I_base_ev_tr, E_base_in_tr, I_base_in_tr,
+                        E_base_ev_v, I_base_ev_v, E_base_in_v, I_base_in_v,
+                    )
+
+                for spec in family_specs:
+                    srcs_set = set(int(s) for s in spec['sources'])
+                    if used_src & srcs_set:
+                        continue
+                    proxy_ev_tr, proxy_in_tr, excl_ev_tr, excl_in_tr = _build_family_proxy_and_atoms(
+                        P_event, P_int, spec['single_idx']
+                    )
+                    proxy_ev_v, proxy_in_v, excl_ev_v, excl_in_v = _build_family_proxy_and_atoms(
+                        P_ev_v_full, P_in_v_full, spec['single_idx']
+                    )
+                    w_proxy = _fit_nonneg_family_weights(
+                        proxy_ev_tr, proxy_in_tr,
+                        E_base_ev_tr, I_base_ev_tr, E_base_in_tr, I_base_in_tr,
+                        event_mask_tr, b_tgt, grid_wts,
+                    )
+                    w_excl = _fit_nonneg_family_weights(
+                        excl_ev_tr, excl_in_tr,
+                        E_base_ev_tr, I_base_ev_tr, E_base_in_tr, I_base_in_tr,
+                        event_mask_tr, b_tgt, grid_wts,
+                    )
+                    base_metric_tr = _balanced_family_metric(
+                        E_base_ev_tr, I_base_ev_tr, E_base_in_tr, I_base_in_tr,
+                        torch.zeros_like(event_mask_tr), torch.zeros_like(grid_wts),
+                        excl_ev_tr, excl_in_tr, event_mask_tr, b_tgt, grid_wts,
+                    )
+                    proxy_metric_tr = _balanced_family_metric(
+                        E_base_ev_tr, I_base_ev_tr, E_base_in_tr, I_base_in_tr,
+                        torch.matmul(proxy_ev_tr, w_proxy), torch.matmul(proxy_in_tr, w_proxy),
+                        excl_ev_tr, excl_in_tr, event_mask_tr, b_tgt, grid_wts,
+                    )
+                    excl_metric_tr = _balanced_family_metric(
+                        E_base_ev_tr, I_base_ev_tr, E_base_in_tr, I_base_in_tr,
+                        torch.matmul(excl_ev_tr, w_excl), torch.matmul(excl_in_tr, w_excl),
+                        excl_ev_tr, excl_in_tr, event_mask_tr, b_tgt, grid_wts,
+                    )
+                    base_metric = _balanced_family_metric(
+                        E_base_ev_v, I_base_ev_v, E_base_in_v, I_base_in_v,
+                        torch.zeros_like(event_mask_v), torch.zeros_like(grid_wts_v),
+                        excl_ev_v, excl_in_v, event_mask_v, b_tgt, grid_wts_v,
+                    )
+                    proxy_metric = _balanced_family_metric(
+                        E_base_ev_v, I_base_ev_v, E_base_in_v, I_base_in_v,
+                        torch.matmul(proxy_ev_v, w_proxy), torch.matmul(proxy_in_v, w_proxy),
+                        excl_ev_v, excl_in_v, event_mask_v, b_tgt, grid_wts_v,
+                    )
+                    excl_metric = _balanced_family_metric(
+                        E_base_ev_v, I_base_ev_v, E_base_in_v, I_base_in_v,
+                        torch.matmul(excl_ev_v, w_excl), torch.matmul(excl_in_v, w_excl),
+                        excl_ev_v, excl_in_v, event_mask_v, b_tgt, grid_wts_v,
+                    )
+                    proxy_impr = min(
+                        float((base_metric_tr - proxy_metric_tr).item()),
+                        float((base_metric - proxy_metric).item()),
+                    )
+                    excl_impr = min(
+                        float((base_metric_tr - excl_metric_tr).item()),
+                        float((base_metric - excl_metric).item()),
+                    )
+
+                    best_mode = None
+                    best_weights = None
+                    best_improvement = 0.0
+                    if proxy_impr > best_improvement + 1e-6:
+                        best_mode = 0
+                        best_weights = w_proxy
+                        best_improvement = proxy_impr
+                    if excl_impr > best_improvement + 1e-6:
+                        best_mode = 1
+                        best_weights = w_excl
+                        best_improvement = excl_impr
+                    if best_mode is None or best_improvement <= 1e-6:
+                        continue
+                    feasible_families += 1
+                    score_med, score_scale = order_score_stats.get(int(spec['order']), (0.0, 1.0))
+                    support_med, support_scale = order_support_stats.get(int(spec['order']), (0.0, 1.0))
+                    z_score = (float(spec.get('cand_score_raw', 0.0)) - score_med) / score_scale
+                    z_support = (float(np.log1p(spec.get('support_x1', 0.0))) - support_med) / support_scale
+                    conflict = sum(float(protected_inh_strength.get(int(s), 0.0)) for s in spec['sources'])
+                    mode_penalty = 0.03 if best_mode == 0 else 0.0
+                    family_items.append({
+                        'kind': 'family',
+                        'sources': spec['sources'],
+                        'target': spec['target'],
+                        'order': spec['order'],
+                        'mode': best_mode,
+                        'weights': best_weights,
+                        'improvement': float(best_improvement),
+                        'score': float(best_improvement) + 0.02 * z_score + 0.01 * z_support - float(family_conflict_penalty) * conflict - mode_penalty,
+                    })
+
+                if not family_items:
+                    break
+
+                for i in range(len(family_items)):
+                    src_i = set(int(s) for s in family_items[i]['sources'])
+                    pen = 0.0
+                    for j in range(len(family_items)):
+                        if i == j:
+                            continue
+                        src_j = set(int(s) for s in family_items[j]['sources'])
+                        if src_i < src_j and family_items[j]['order'] > family_items[i]['order']:
+                            sup_score = float(family_items[j]['score'])
+                            cur_score = float(family_items[i]['score'])
+                            if sup_score > 0.0 and sup_score >= 0.8 * cur_score:
+                                pen = max(pen, 0.75 * sup_score)
+                    family_items[i]['score'] -= pen
+
+                best_item = max(family_items, key=lambda x: float(x['score']))
+                if float(best_item['score']) <= 0.0:
+                    break
+                chosen_family_items.append(best_item)
+                used_src |= set(int(s) for s in best_item['sources'])
+
+    used_family_sources = set()
+    for item in chosen_family_items:
+        used_family_sources |= set(int(s) for s in item['sources'])
+    backfill_items = []
+    if len(protected_items) + len(chosen_family_items) < R:
+        for item in selected_items:
+            if item in protected_items:
+                continue
+            if len(set(int(s) for s in item['cand']['sources']) & used_family_sources) > 0:
+                continue
+            backfill_items.append(item)
+            if len(protected_items) + len(chosen_family_items) + len(backfill_items) >= R:
+                break
+
+    final_items = protected_items + chosen_family_items + backfill_items
+    top_R = min(R, len(final_items))
 
     print(f"  6.3  Top-{R} truncation (from {n_alive} alive)")
+    print(f"  Family hypotheses feasible={feasible_families} active={len(chosen_family_items)}")
     print(f"  Incremental ranking (top {top_R}):")
-    for rank, (loc, gain) in enumerate(zip(selected_local[:top_R], incremental_gain[:top_R])):
-        glob = int(alive_idx[loc].item())
-        c = candidates[glob]
-        src_str = ','.join(str(s) for s in c['sources'])
-        print(f"    #{rank}: {{{src_str}}}→{c['target']}  "
-              f"gain={gain:+.4f}  "
-              f"Δdrop={delta_nlls[loc]:+.4f}  "
-              f"w_exc={cur_we[rank]:.4f}  w_inh={cur_wi[rank]:.4f}")
+    for rank, item in enumerate(final_items[:top_R]):
+        if item['kind'] == 'raw':
+            src_str = ','.join(str(s) for s in item['cand']['sources'])
+            print(f"    #{rank}: {{{src_str}}}→{item['cand']['target']}  "
+                  f"gain={item['gain']:+.4f}  "
+                  f"Δdrop={item['delta_drop']:+.4f}  "
+                  f"w_exc={item['w_exc']:.4f}  w_inh={item['w_inh']:.4f}")
+        else:
+            src_str = ','.join(str(s) for s in item['sources'])
+            print(f"    #{rank}: FAMILY-{('EXCL' if item['mode'] == 1 else 'PROXY')}{{{src_str}}}→{item['target']}  "
+                  f"impr={item['improvement']:+.4f}  "
+                  f"w={tuple(round(float(x),4) for x in item['weights'].tolist())}")
 
-    # Inject top-R rules into model
+    # Inject final units into model
     with torch.no_grad():
         model.b0.data = _sp_inv_t(b_vec.to(device))
+        if hasattr(model, 'clear_family_hypotheses'):
+            model.clear_family_hypotheses()
 
         for slot in range(R):
             if slot < top_R:
-                loc = int(selected_local[slot])
-                glob = int(alive_idx[loc].item())
-                cand = candidates[glob]
-                _inject_single_rule(
-                    model, slot, cand,
-                    float(cur_we[slot]), float(cur_wi[slot]),
-                    D, device,
-                )
+                item = final_items[slot]
+                if item['kind'] == 'raw':
+                    _inject_single_rule(
+                        model, slot, item['cand'],
+                        float(item['w_exc']), float(item['w_inh']),
+                        D, device,
+                    )
+                else:
+                    _inject_family_hypothesis_rule(model, slot, item, D, device)
             else:
-                # Fill empty slots with noise
                 _inject_noise_rule(model, slot, D, device, fixed_target=fixed_target)
 
         # Freeze bias
@@ -2053,6 +2565,24 @@ def _inject_single_rule(model, slot, cand, w_exc_val, w_inh_val, D, device):
     model.rule_bias_raw.data[slot] = _sp_inv(bv) if bv > 0 else -5.0
 
 
+def _inject_family_hypothesis_rule(model, slot, item, D, device):
+    model.theta.data[:, slot] = -3.0
+    model.rule_target_logits.data[slot, :] = -3.0
+    model.rule_target_logits.data[slot, int(item['target'])] = 3.0
+    model.sign_logits.data[slot] = -3.0
+    model.w_exc_raw.data[slot] = -3.0
+    model.w_inh_raw.data[slot] = -3.0
+    model.rule_bias_raw.data[slot] = -5.0
+    if hasattr(model, 'register_family_hypothesis'):
+        model.register_family_hypothesis(
+            slot=slot,
+            target=int(item['target']),
+            sources=tuple(int(s) for s in item['sources']),
+            mode=int(item['mode']),
+            weights=item['weights'],
+        )
+
+
 def _inject_noise_rule(model, slot, D, device, fixed_target: int | None = None):
     """Fill empty slot with weak random noise."""
     model.theta.data[:, slot] = torch.randn(D, device=device) * 0.3 - 1.0
@@ -2072,6 +2602,8 @@ def _inject_noise_rule(model, slot, D, device, fixed_target: int | None = None):
 def _inject_random(model, D, R, b_vec, device, fixed_target: int | None = None):
     """Fallback: random initialisation if no rules survived."""
     with torch.no_grad():
+        if hasattr(model, 'clear_family_hypotheses'):
+            model.clear_family_hypotheses()
         model.b0.data = _sp_inv_t(b_vec.to(device))
         for r in range(R):
             _inject_noise_rule(model, r, D, device, fixed_target=fixed_target)

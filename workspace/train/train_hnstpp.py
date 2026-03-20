@@ -222,6 +222,12 @@ if __name__ == '__main__':
         phase3_source_pool_topk=int(hcfg.get('wh_phase3_source_pool_topk', 24)),
         phase3_beta2=float(hcfg.get('wh_phase3_beta2', 0.5)),
         phase3_beta3=float(hcfg.get('wh_phase3_beta3', 1.0)),
+        phase4_source_cap=(
+            None if hcfg.get('wh_phase4_source_cap', None) is None
+            else float(hcfg.get('wh_phase4_source_cap'))
+        ),
+        phase6_protect_best_inh_single=bool(hcfg.get('wh_phase6_protect_best_inh_single', True)),
+        phase6_family_conflict_penalty=float(hcfg.get('wh_phase6_family_conflict_penalty', 0.35)),
         fixed_target=fixed_target,
     )
 
