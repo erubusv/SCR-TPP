@@ -92,25 +92,54 @@ def print_rule_block(title: str, rules, fixed_target: int):
         print(f"  - {format_rule(rule, fixed_target)}")
 
 
-def predict_rules(model: HNSTPPComponentBasis, threshold: float = 1e-3):
+def print_ranked_rule_block(title: str, rows, fixed_target: int):
+    print(title)
+    if not rows:
+        print("  - none")
+        return
+    for row in rows:
+        print(f"  - {format_rule(row['rule'], fixed_target)} [score={row['score']:.6f}, margin={row['margin']:.6f}]")
+
+
+def ranked_rule_candidates(model: HNSTPPComponentBasis, threshold: float = 1e-3):
     st = model.get_structure()
     atom_sources = st["atom_sources"].numpy().astype(int)
     w_exc = st["w_exc"].numpy()
     w_inh = st["w_inh"].numpy()
     target = int(st["fixed_target"])
 
-    preds = set()
+    rows = []
     for atom_id in range(atom_sources.shape[0]):
         srcs = tuple(sorted(int(s) for s in atom_sources[atom_id] if int(s) >= 0))
         if not srcs:
             continue
         we = float(w_exc[atom_id])
         wi = float(w_inh[atom_id])
-        if max(we, wi) <= threshold:
+        score = max(we, wi)
+        if score <= threshold:
             continue
         sign = "exc" if we >= wi else "inh"
-        preds.add((srcs, sign, target))
-    return preds
+        rows.append(
+            {
+                "rule": (srcs, sign, target),
+                "score": float(score),
+                "margin": float(abs(we - wi)),
+                "order": len(srcs),
+            }
+        )
+    return rows
+
+
+def select_top_rules(rows, k: int):
+    best_by_lhs = {}
+    for row in rows:
+        key = (row["rule"][0], row["rule"][2])
+        cur = best_by_lhs.get(key)
+        sort_key = (float(row["score"]), float(row["margin"]), int(row["order"]))
+        if cur is None or sort_key > cur["sort_key"]:
+            best_by_lhs[key] = {**row, "sort_key": sort_key}
+    ranked = sorted(best_by_lhs.values(), key=lambda x: x["sort_key"], reverse=True)
+    return ranked[: max(int(k), 0)]
 
 
 def main():
@@ -125,6 +154,7 @@ def main():
     ap.add_argument("--source_pool_topk", type=int, default=8)
     ap.add_argument("--max_source_order", type=int, default=3)
     ap.add_argument("--topk_per_order", type=int, default=8)
+    ap.add_argument("--prediction_k", type=int, default=None)
     args = ap.parse_args()
 
     set_seed(args.seed)
@@ -199,13 +229,17 @@ def main():
     print(f"runtime nll = {float(loss_dict['nll_loss'].item()):.6f}")
 
     gt = gt_rules_from_config(cfg)
-    preds = predict_rules(model)
+    prediction_k = int(args.prediction_k) if args.prediction_k is not None else len(gt)
+    ranked_preds = ranked_rule_candidates(model)
+    selected_rows = select_top_rules(ranked_preds, prediction_k)
+    preds = {row["rule"] for row in selected_rows}
     hit = sorted(gt & preds)
     miss = sorted(gt - preds)
     extra = sorted(preds - gt)
 
     print("===RULE REPORT===")
     print_rule_block("True rules:", sorted(gt), int(args.fixed_target))
+    print_ranked_rule_block(f"Top-{prediction_k} predicted rules:", selected_rows, int(args.fixed_target))
     print_rule_block("Matched rules:", hit, int(args.fixed_target))
     print_rule_block("Missing rules:", miss, int(args.fixed_target))
     print_rule_block("Extra predicted rules:", extra, int(args.fixed_target))
@@ -215,8 +249,10 @@ def main():
         "recall": len(hit) / max(len(gt), 1),
         "hit_count": len(hit),
         "gt_count": len(gt),
+        "prediction_k": prediction_k,
         "num_sources": len(structure_cfg["source_defs"]),
         "num_atoms": len(structure_cfg["atoms"]),
+        "pred": [row["rule"] for row in selected_rows],
         "hit": hit,
         "miss": miss,
         "extra": extra,

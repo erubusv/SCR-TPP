@@ -96,9 +96,43 @@ def gt_rules_from_config(config: dict):
     return gt
 
 
+def node_label(node: int, fixed_target: int) -> str:
+    if int(node) == int(fixed_target):
+        return "T"
+    if 0 <= int(node) < 26:
+        return chr(ord("A") + int(node))
+    return f"S{int(node)}"
+
+
+def format_rule(rule, fixed_target: int) -> str:
+    srcs, sign, target = rule
+    lhs = " and ".join(node_label(int(s), fixed_target) for s in srcs)
+    rhs = node_label(int(target), fixed_target)
+    sign_txt = "excitation" if sign == "exc" else "inhibition"
+    return f"{lhs} -> {rhs} : {sign_txt}"
+
+
+def print_rule_block(title: str, rules, fixed_target: int):
+    print(title)
+    if not rules:
+        print("  - none")
+        return
+    for rule in rules:
+        print(f"  - {format_rule(rule, fixed_target)}")
+
+
+def print_ranked_rule_block(title: str, rows, fixed_target: int):
+    print(title)
+    if not rows:
+        print("  - none")
+        return
+    for row in rows:
+        print(f"  - {format_rule(row['rule'], fixed_target)} [score={row['score']:.6f}, margin={row['margin']:.6f}]")
+
+
 def predicted_rules(model: HNSTPP):
     st = model.get_structure()
-    preds = set()
+    rows = []
 
     H = st["H"].numpy().astype(int)
     Head = st["Head"].numpy().astype(int)
@@ -107,12 +141,22 @@ def predicted_rules(model: HNSTPP):
     family_active = st["family_hyp_active"].numpy().astype(bool)
     family_target = st["family_hyp_target"].numpy().astype(int)
     family_sources = st["family_hyp_sources"].numpy().astype(int)
+    family_weight = st["family_hyp_weight"].numpy()
 
     for r in range(H.shape[1]):
         if family_active[r]:
             srcs = tuple(sorted(int(s) for s in family_sources[r] if int(s) >= 0))
             if srcs:
-                preds.add((srcs, "inh", int(family_target[r])))
+                score = float(np.max(family_weight[r]))
+                if score > 1.0e-4:
+                    rows.append(
+                        {
+                            "rule": (srcs, "inh", int(family_target[r])),
+                            "score": score,
+                            "margin": score,
+                            "order": len(srcs),
+                        }
+                    )
             continue
 
         srcs = tuple(sorted(int(s) for s in np.where(H[:, r] > 0)[0].tolist()))
@@ -121,12 +165,32 @@ def predicted_rules(model: HNSTPP):
         tgt = int(np.argmax(Head[r]))
         w_exc = float(W_pos[r])
         w_inh = float(W_neg[r])
-        if w_exc <= 1.0e-4 and w_inh <= 1.0e-4:
+        score = max(w_exc, w_inh)
+        if score <= 1.0e-4:
             continue
         sign = "exc" if w_exc >= w_inh else "inh"
-        preds.add((srcs, sign, tgt))
+        rows.append(
+            {
+                "rule": (srcs, sign, tgt),
+                "score": float(score),
+                "margin": float(abs(w_exc - w_inh)),
+                "order": len(srcs),
+            }
+        )
 
-    return preds, int(family_active.sum())
+    return rows, int(family_active.sum())
+
+
+def select_top_rules(rows, k: int):
+    best_by_lhs = {}
+    for row in rows:
+        key = (row["rule"][0], row["rule"][2])
+        cur = best_by_lhs.get(key)
+        sort_key = (float(row["score"]), float(row["margin"]), int(row["order"]))
+        if cur is None or sort_key > cur["sort_key"]:
+            best_by_lhs[key] = {**row, "sort_key": sort_key}
+    ranked = sorted(best_by_lhs.values(), key=lambda x: x["sort_key"], reverse=True)
+    return ranked[: max(int(k), 0)]
 
 
 def main():
@@ -154,6 +218,7 @@ def main():
     ap.add_argument("--wh_phase6_protect_best_inh_single", action="store_true")
     ap.add_argument("--no-wh_phase6_protect_best_inh_single", dest="wh_phase6_protect_best_inh_single", action="store_false")
     ap.add_argument("--wh_phase6_family_conflict_penalty", type=float, default=0.35)
+    ap.add_argument("--prediction_k", type=int, default=None)
     ap.set_defaults(wh_phase6_protect_best_inh_single=True)
     args = ap.parse_args()
 
@@ -192,17 +257,29 @@ def main():
     elapsed = time.time() - t0
 
     gt = gt_rules_from_config(cfg)
-    preds, family_active = predicted_rules(model)
+    prediction_k = int(args.prediction_k) if args.prediction_k is not None else len(gt)
+    ranked_preds, family_active = predicted_rules(model)
+    selected_rows = select_top_rules(ranked_preds, prediction_k)
+    preds = {row["rule"] for row in selected_rows}
     hit = sorted(gt & preds)
     miss = sorted(gt - preds)
     extra = sorted(preds - gt)
+
+    print("===RULE REPORT===")
+    print_rule_block("True rules:", sorted(gt), int(args.fixed_target))
+    print_ranked_rule_block(f"Top-{prediction_k} predicted rules:", selected_rows, int(args.fixed_target))
+    print_rule_block("Matched rules:", hit, int(args.fixed_target))
+    print_rule_block("Missing rules:", miss, int(args.fixed_target))
+    print_rule_block("Extra predicted rules:", extra, int(args.fixed_target))
 
     out = {
         "elapsed_sec": elapsed,
         "recall": len(hit) / max(len(gt), 1),
         "hit_count": len(hit),
         "gt_count": len(gt),
+        "prediction_k": prediction_k,
         "family_active": family_active,
+        "pred": [row["rule"] for row in selected_rows],
         "hit": hit,
         "miss": miss,
         "extra": extra,
