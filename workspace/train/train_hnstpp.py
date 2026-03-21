@@ -228,6 +228,12 @@ if __name__ == '__main__':
         ),
         phase6_protect_best_inh_single=bool(hcfg.get('wh_phase6_protect_best_inh_single', True)),
         phase6_family_conflict_penalty=float(hcfg.get('wh_phase6_family_conflict_penalty', 0.35)),
+        phase4_fixed_kernel_shape=str(hcfg.get('wh_phase4_fixed_kernel_shape', 'flat')),
+        phase4_fixed_kernel_peak=float(hcfg.get('wh_phase4_fixed_kernel_peak', 1.0)),
+        phase4_fixed_kernel_sigma=float(hcfg.get('wh_phase4_fixed_kernel_sigma', 0.75)),
+        phase4_fixed_kernel_amp=float(hcfg.get('wh_phase4_fixed_kernel_amp', 0.5)),
+        phase4_fixed_kernel_trunc_mult=float(hcfg.get('wh_phase4_fixed_kernel_trunc_mult', 3.0)),
+        freeze_kernel_after_init=bool(hcfg.get('freeze_kernel_after_init', False)),
         fixed_target=fixed_target,
     )
 

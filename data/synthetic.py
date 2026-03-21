@@ -31,6 +31,25 @@ def triangular_kernel_func(dt, peak, width, mix_weight):
     return mix_weight * ((width - dt) / (width - peak))
 
 
+@njit(fastmath=True, cache=True, inline='always')
+def gaussian_kernel_func(dt, peak, sigma, mix_weight, support_mult):
+    """Causal truncated Gaussian with peak at `peak` and std `sigma`.
+
+    The kernel is zero outside [0, peak + support_mult * sigma].
+    Width in config is interpreted as sigma for gaussian kernels.
+    """
+    if dt <= 0.0:
+        return 0.0
+
+    eps = 1e-12
+    sigma = max(sigma, eps)
+    support = peak + max(support_mult, 0.0) * sigma
+    if dt > support:
+        return 0.0
+    z = (dt - peak) / sigma
+    return mix_weight * np.exp(-0.5 * z * z)
+
+
 class Rule:
     """Rule container used by the synthetic generator."""
 
@@ -49,11 +68,18 @@ class Rule:
             src_type = int(src_type)
             params_array = np.array(params, dtype=np.float64)
             if params_array.shape[0] == 0:
-                params_array = np.array([[0.5, 1.0, 1.0]], dtype=np.float64)
+                params_array = np.array([[0.5, 1.0, 1.0, 3.0]], dtype=np.float64)
+            if params_array.shape[1] == 3:
+                support_mult = np.full((params_array.shape[0], 1), 3.0, dtype=np.float64)
+                params_array = np.concatenate([params_array, support_mult], axis=1)
 
             # Ensure peak <= width to keep triangular shape valid.
-            params_array[:, 1] = np.maximum(params_array[:, 1], 1e-6)  # width
-            params_array[:, 0] = np.clip(params_array[:, 0], 1e-6, params_array[:, 1] - 1e-6)  # peak
+            params_array[:, 1] = np.maximum(params_array[:, 1], 1e-6)  # width or sigma
+            if self.kernel_type == 'triangular':
+                params_array[:, 0] = np.clip(params_array[:, 0], 1e-6, params_array[:, 1] - 1e-6)  # peak
+            else:
+                params_array[:, 0] = np.maximum(params_array[:, 0], 1e-6)
+            params_array[:, 3] = np.maximum(params_array[:, 3], 0.0)
 
             mix_weights = params_array[:, 2]
             mix_sum = mix_weights.sum()
@@ -61,7 +87,10 @@ class Rule:
                 params_array[:, 2] = mix_weights / mix_sum
 
             self.kernel_params_arrays[src_type] = params_array
-            self.max_support[src_type] = float(np.max(params_array[:, 1]))
+            if self.kernel_type == 'triangular':
+                self.max_support[src_type] = float(np.max(params_array[:, 1]))
+            else:
+                self.max_support[src_type] = float(np.max(params_array[:, 0] + params_array[:, 3] * params_array[:, 1]))
 
     def compute_kernel_sum_and_count(self, t, event_history_arrays, event_counts):
         """Compute raw kernel sum and #events in support windows."""
@@ -90,9 +119,11 @@ class Rule:
 
                 count_window += 1
                 for i in range(len(params)):
-                    peak, width, mix_weight = params[i, 0], params[i, 1], params[i, 2]
+                    peak, width, mix_weight, support_mult = params[i, 0], params[i, 1], params[i, 2], params[i, 3]
                     if self.kernel_type == 'triangular':
                         val = triangular_kernel_func(dt, peak, width, mix_weight)
+                    elif self.kernel_type == 'gaussian':
+                        val = gaussian_kernel_func(dt, peak, width, mix_weight, support_mult)
                     else:
                         val = triangular_kernel_func(dt, peak, width, mix_weight)
                     kernel_sum += val
@@ -244,7 +275,8 @@ def create_rules_from_config(config):
             peaks = params.get('peaks', [0.8])
             widths = params.get('widths', [1.6])
             mix_weights = params.get('mix_weights', [1.0])
-            kernel_params[src_type] = list(zip(peaks, widths, mix_weights))
+            support_mults = params.get('support_mults', [3.0] * len(peaks))
+            kernel_params[src_type] = list(zip(peaks, widths, mix_weights, support_mults))
 
         rules.append(
             Rule(

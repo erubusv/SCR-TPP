@@ -58,6 +58,12 @@ def wiener_hopf_initialize(
     exc_prefit_steps: int = 40,
     phase6_protect_best_inh_single: bool = True,
     phase6_family_conflict_penalty: float = 0.35,
+    phase4_fixed_kernel_shape: str = "flat",
+    phase4_fixed_kernel_peak: float = 1.0,
+    phase4_fixed_kernel_sigma: float = 0.75,
+    phase4_fixed_kernel_amp: float = 0.5,
+    phase4_fixed_kernel_trunc_mult: float = 3.0,
+    freeze_kernel_after_init: bool = False,
     fixed_target: int | None = None,
 ) -> None:
     """Run the full 6-phase deterministic initialisation.
@@ -202,6 +208,12 @@ def wiener_hopf_initialize(
         protect_best_inh_single=phase6_protect_best_inh_single,
         family_conflict_penalty=phase6_family_conflict_penalty,
         fixed_target=fixed_target,
+        phase4_fixed_kernel_shape=phase4_fixed_kernel_shape,
+        phase4_fixed_kernel_peak=phase4_fixed_kernel_peak,
+        phase4_fixed_kernel_sigma=phase4_fixed_kernel_sigma,
+        phase4_fixed_kernel_amp=phase4_fixed_kernel_amp,
+        phase4_fixed_kernel_trunc_mult=phase4_fixed_kernel_trunc_mult,
+        freeze_kernel_after_init=freeze_kernel_after_init,
     )
 
     _banner("Initialisation complete")
@@ -1066,6 +1078,11 @@ def _mine_higher_order_rows(
 def _phase4_cache_features(
     candidates, data_list, D, model, device, int_grid_mult=3,
     source_cap: float | None = None,
+    phase4_fixed_kernel_shape: str = "flat",
+    phase4_fixed_kernel_peak: float = 1.0,
+    phase4_fixed_kernel_sigma: float = 0.75,
+    phase4_fixed_kernel_amp: float = 0.5,
+    phase4_fixed_kernel_trunc_mult: float = 3.0,
 ):
     """Pre-compute P_event [N, K] and P_int [M_grid, K].
 
@@ -1154,25 +1171,35 @@ def _phase4_cache_features(
     # ── Kernel setup from model ─────────────────────────────────
     max_cap = float(model.max_cap or 10.0)
     M_bins = model.num_bins
-    # Use a flat kernel height for overcomplete candidates.
-    # We keep this scalar synchronized with bias design (A-option):
-    #   bias_r = (|S_r| - 0.5) * h_unit
-    # so that a perfect pair activation (two sources once each) stays active.
-    h_unit = 0.5
-    h_raw_flat = float(_sp_inv(h_unit))
-    h_full = np.zeros(M_bins + 1)  # endpoints 0
-    h_full[1:-1] = np.log1p(np.exp(h_raw_flat))  # softplus(h_raw)
+    # Use a fixed kernel shape for overcomplete candidates.
+    # Biases stay synchronized to the peak amplitude h_unit so that
+    # a perfect N-source conjunction remains active near the kernel peak.
+    kernel_shape = str(phase4_fixed_kernel_shape).lower()
+    h_unit = float(phase4_fixed_kernel_amp)
+    h_full = _build_fixed_kernel_grid(
+        max_cap=max_cap,
+        num_bins=M_bins,
+        shape=kernel_shape,
+        amp=float(phase4_fixed_kernel_amp),
+        peak=float(phase4_fixed_kernel_peak),
+        sigma=float(phase4_fixed_kernel_sigma),
+        trunc_mult=float(phase4_fixed_kernel_trunc_mult),
+    )
     bin_w = max_cap / M_bins
 
     def _eval_kernel_np(dt_arr):
-        """Evaluate piecewise-linear kernel on numpy array.  Returns (len,)."""
-        valid = (dt_arr >= 0) & (dt_arr < max_cap)
-        dt_c = np.clip(dt_arr, 0, max_cap * (1 - 1e-7))
-        dt_norm = dt_c / bin_w
-        idx = np.clip(dt_norm.astype(np.int64), 0, M_bins - 1)
-        frac = dt_norm - idx
-        vals = h_full[idx] + (h_full[idx + 1] - h_full[idx]) * frac
-        return vals * valid
+        """Evaluate fixed candidate kernel on numpy array. Returns (len,)."""
+        return _eval_fixed_kernel_np(
+            dt_arr,
+            max_cap=max_cap,
+            num_bins=M_bins,
+            h_full=h_full,
+            shape=kernel_shape,
+            amp=float(phase4_fixed_kernel_amp),
+            peak=float(phase4_fixed_kernel_peak),
+            sigma=float(phase4_fixed_kernel_sigma),
+            trunc_mult=float(phase4_fixed_kernel_trunc_mult),
+        )
 
     # ── Candidate source mask and bias (A-option synchronized with h_unit) ──
     biases = np.array([
@@ -1991,6 +2018,12 @@ def _phase6_refit_and_inject(
     protect_best_inh_single: bool = True,
     family_conflict_penalty: float = 0.35,
     fixed_target: int | None = None,
+    phase4_fixed_kernel_shape: str = "flat",
+    phase4_fixed_kernel_peak: float = 1.0,
+    phase4_fixed_kernel_sigma: float = 0.75,
+    phase4_fixed_kernel_amp: float = 0.5,
+    phase4_fixed_kernel_trunc_mult: float = 3.0,
+    freeze_kernel_after_init: bool = False,
 ):
     """Step 6.1 debiased refit, 6.2 global incremental selection, 6.3 Top-R injection."""
     print(f"\n[Phase 6] Debiased refit + Global incremental Top-R truncation")
@@ -2490,6 +2523,8 @@ def _phase6_refit_and_inject(
 
     # Inject final units into model
     with torch.no_grad():
+        h_unit = float(phase4_fixed_kernel_amp)
+        kernel_shape = str(phase4_fixed_kernel_shape).lower()
         model.b0.data = _sp_inv_t(b_vec.to(device))
         if hasattr(model, 'clear_family_hypotheses'):
             model.clear_family_hypotheses()
@@ -2501,7 +2536,7 @@ def _phase6_refit_and_inject(
                     _inject_single_rule(
                         model, slot, item['cand'],
                         float(item['w_exc']), float(item['w_inh']),
-                        D, device,
+                        D, device, kernel_unit=h_unit,
                     )
                 else:
                     _inject_family_hypothesis_rule(model, slot, item, D, device)
@@ -2518,8 +2553,17 @@ def _phase6_refit_and_inject(
         else:
             model.rule_target_logits.requires_grad = True
 
-        # Kernel: flat init at 0.5 for all rules
-        model.kernel_height_raw.data.fill_(_sp_inv(0.5))
+        kernel_heights = _fixed_kernel_heights_from_shape(
+            model.num_bins,
+            max_cap=float(model.max_cap or max_cap),
+            shape=kernel_shape,
+            amp=float(phase4_fixed_kernel_amp),
+            peak=float(phase4_fixed_kernel_peak),
+            sigma=float(phase4_fixed_kernel_sigma),
+            trunc_mult=float(phase4_fixed_kernel_trunc_mult),
+        )
+        model.kernel_height_raw.data.copy_(kernel_heights.to(device))
+        model.kernel_height_raw.requires_grad = not bool(freeze_kernel_after_init)
 
     bk = F.softplus(model.b0).data.cpu().numpy()
     bias = F.softplus(model.rule_bias_raw).data.cpu().numpy()
@@ -2531,7 +2575,7 @@ def _phase6_refit_and_inject(
 #  Parameter injection helpers                                         #
 # ================================================================== #
 
-def _inject_single_rule(model, slot, cand, w_exc_val, w_inh_val, D, device):
+def _inject_single_rule(model, slot, cand, w_exc_val, w_inh_val, D, device, kernel_unit: float = 0.5):
     """Write one candidate rule into model slot."""
     sources = cand['sources']
     tgt = cand['target']
@@ -2560,8 +2604,7 @@ def _inject_single_rule(model, slot, cand, w_exc_val, w_inh_val, D, device):
     # With flat kernel height h_unit=0.5:
     #   bias_r = (N_sources - 0.5) * h_unit
     N_r = len(sources)
-    h_unit = 0.5
-    bv = max((N_r - 0.5) * h_unit, 0.0)
+    bv = max((N_r - 0.5) * float(kernel_unit), 0.0)
     model.rule_bias_raw.data[slot] = _sp_inv(bv) if bv > 0 else -5.0
 
 
@@ -2616,6 +2659,7 @@ def _inject_random(model, D, R, b_vec, device, fixed_target: int | None = None):
         else:
             model.rule_target_logits.requires_grad = True
         model.kernel_height_raw.data.fill_(_sp_inv(0.5))
+        model.kernel_height_raw.requires_grad = True
 
 
 # ================================================================== #
@@ -2698,6 +2742,86 @@ def _sp_inv_t(x: torch.Tensor) -> torch.Tensor:
         x,
         torch.log(torch.expm1(x) + 1e-9),
     )
+
+
+def _build_fixed_kernel_grid(
+    *,
+    max_cap: float,
+    num_bins: int,
+    shape: str,
+    amp: float,
+    peak: float,
+    sigma: float,
+    trunc_mult: float,
+) -> np.ndarray:
+    """Build full kernel grid values including fixed zero endpoints."""
+    h_full = np.zeros(num_bins + 1, dtype=np.float32)
+    if shape == "flat":
+        h_full[1:-1] = float(amp)
+        return h_full
+
+    grid = np.linspace(0.0, float(max_cap), num_bins + 1, dtype=np.float32)
+    if shape == "gaussian":
+        support = min(float(max_cap), float(peak) + max(float(trunc_mult), 0.0) * max(float(sigma), 1e-6))
+        z = (grid - float(peak)) / max(float(sigma), 1e-6)
+        vals = float(amp) * np.exp(-0.5 * z * z)
+        vals[(grid <= 0.0) | (grid >= support)] = 0.0
+        h_full[:] = vals.astype(np.float32)
+        h_full[0] = 0.0
+        h_full[-1] = 0.0
+        return h_full
+
+    raise ValueError(f"Unsupported fixed kernel shape: {shape}")
+
+
+def _eval_fixed_kernel_np(
+    dt_arr: np.ndarray,
+    *,
+    max_cap: float,
+    num_bins: int,
+    h_full: np.ndarray,
+    shape: str,
+    amp: float,
+    peak: float,
+    sigma: float,
+    trunc_mult: float,
+) -> np.ndarray:
+    if shape not in ("flat", "gaussian"):
+        raise ValueError(f"Unsupported fixed kernel shape: {shape}")
+    valid = (dt_arr >= 0) & (dt_arr < max_cap)
+    if shape == "gaussian":
+        support = min(float(max_cap), float(peak) + max(float(trunc_mult), 0.0) * max(float(sigma), 1e-6))
+        valid = valid & (dt_arr <= support)
+    dt_c = np.clip(dt_arr, 0, max_cap * (1 - 1e-7))
+    bin_w = max_cap / num_bins
+    dt_norm = dt_c / bin_w
+    idx = np.clip(dt_norm.astype(np.int64), 0, num_bins - 1)
+    frac = dt_norm - idx
+    vals = h_full[idx] + (h_full[idx + 1] - h_full[idx]) * frac
+    return vals * valid
+
+
+def _fixed_kernel_heights_from_shape(
+    num_bins: int,
+    *,
+    max_cap: float,
+    shape: str,
+    amp: float,
+    peak: float,
+    sigma: float,
+    trunc_mult: float,
+) -> torch.Tensor:
+    h_full = _build_fixed_kernel_grid(
+        max_cap=max_cap,
+        num_bins=num_bins,
+        shape=shape,
+        amp=amp,
+        peak=peak,
+        sigma=sigma,
+        trunc_mult=trunc_mult,
+    )
+    h_inner = np.maximum(h_full[1:-1], 1e-6)
+    return _sp_inv_t(torch.as_tensor(h_inner, dtype=torch.float32))
 
 
 def _banner(msg: str):

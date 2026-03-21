@@ -29,9 +29,15 @@ hnstpp:
   wh_phase3_beta2: 0.5
   wh_phase3_beta3: 1.0
   wh_phase4_source_cap: null     # set 0.5 to cap per-source Phase-4 signal and reduce proxy collapse
+  wh_phase4_fixed_kernel_shape: flat   # flat | gaussian
+  wh_phase4_fixed_kernel_peak: 1.0
+  wh_phase4_fixed_kernel_sigma: 0.75
+  wh_phase4_fixed_kernel_amp: 0.5
+  wh_phase4_fixed_kernel_trunc_mult: 3.0
   wh_phase6_protect_best_inh_single: true
   wh_phase6_family_conflict_penalty: 0.35
   wh_fixed_target: 12          # fixed target id for single-target WH init
+  freeze_kernel_after_init: false
 
   # Default init (overridden by Wiener-Hopf for assigned rules)
   init_b0: -3.0

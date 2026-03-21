@@ -145,6 +145,12 @@ def main():
     ap.add_argument("--wh_delta_t", type=float, default=0.1)
     ap.add_argument("--wh_max_lag", type=float, default=10.0)
     ap.add_argument("--wh_phase4_source_cap", type=float, default=None)
+    ap.add_argument("--wh_phase4_fixed_kernel_shape", type=str, default="flat")
+    ap.add_argument("--wh_phase4_fixed_kernel_peak", type=float, default=1.0)
+    ap.add_argument("--wh_phase4_fixed_kernel_sigma", type=float, default=0.75)
+    ap.add_argument("--wh_phase4_fixed_kernel_amp", type=float, default=0.5)
+    ap.add_argument("--wh_phase4_fixed_kernel_trunc_mult", type=float, default=3.0)
+    ap.add_argument("--freeze_kernel_after_init", action="store_true")
     ap.add_argument("--wh_phase6_protect_best_inh_single", action="store_true")
     ap.add_argument("--no-wh_phase6_protect_best_inh_single", dest="wh_phase6_protect_best_inh_single", action="store_false")
     ap.add_argument("--wh_phase6_family_conflict_penalty", type=float, default=0.35)
@@ -173,6 +179,12 @@ def main():
         max_source_order=int(args.wh_max_source_order),
         phase3_support_tau=float(args.wh_phase3_support_tau),
         phase4_source_cap=args.wh_phase4_source_cap,
+        phase4_fixed_kernel_shape=str(args.wh_phase4_fixed_kernel_shape),
+        phase4_fixed_kernel_peak=float(args.wh_phase4_fixed_kernel_peak),
+        phase4_fixed_kernel_sigma=float(args.wh_phase4_fixed_kernel_sigma),
+        phase4_fixed_kernel_amp=float(args.wh_phase4_fixed_kernel_amp),
+        phase4_fixed_kernel_trunc_mult=float(args.wh_phase4_fixed_kernel_trunc_mult),
+        freeze_kernel_after_init=bool(args.freeze_kernel_after_init),
         phase6_protect_best_inh_single=bool(args.wh_phase6_protect_best_inh_single),
         phase6_family_conflict_penalty=float(args.wh_phase6_family_conflict_penalty),
         fixed_target=int(args.fixed_target),
