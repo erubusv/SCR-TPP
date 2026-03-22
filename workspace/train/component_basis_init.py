@@ -30,6 +30,7 @@ class SourceDef:
     kernel_eval_mode: str = "triangular_exact"
     kernel_num_bins: int = 20
     kernel_max_cap: float = 10.0
+    kernel_support_mult: float = 3.0
 
 
 @dataclass
@@ -114,6 +115,51 @@ def _triangular_piecewise_linear_kernel(
         return out
     grid = np.linspace(0.0, float(max_cap), int(num_bins) + 1, dtype=np.float64)
     h = _triangular_kernel(grid, peak, width)
+    dv = np.clip(dt[valid], 0.0, float(max_cap) * (1.0 - 1e-7))
+    bin_w = float(max_cap) / float(num_bins)
+    idx = np.clip((dv / bin_w).astype(np.int64), 0, int(num_bins) - 1)
+    frac = (dv / bin_w) - idx
+    out[valid] = h[idx] + (h[idx + 1] - h[idx]) * frac
+    return out
+
+
+def _gaussian_kernel(
+    dt: np.ndarray,
+    peak: float,
+    support: float,
+    *,
+    support_mult: float,
+) -> np.ndarray:
+    out = np.zeros_like(dt, dtype=np.float64)
+    if support <= 1e-8:
+        return out
+    valid = (dt > 0.0) & (dt < support)
+    if not np.any(valid):
+        return out
+    sigma = max((float(support) - float(peak)) / max(float(support_mult), 1e-6), 1e-6)
+    dv = dt[valid]
+    z = (dv - float(peak)) / sigma
+    out[valid] = np.exp(-0.5 * z * z)
+    return out
+
+
+def _gaussian_piecewise_linear_kernel(
+    dt: np.ndarray,
+    peak: float,
+    support: float,
+    *,
+    num_bins: int,
+    max_cap: float,
+    support_mult: float,
+) -> np.ndarray:
+    out = np.zeros_like(dt, dtype=np.float64)
+    if max_cap <= 1e-8 or num_bins <= 0:
+        return out
+    valid = (dt > 0.0) & (dt < max_cap)
+    if not np.any(valid):
+        return out
+    grid = np.linspace(0.0, float(max_cap), int(num_bins) + 1, dtype=np.float64)
+    h = _gaussian_kernel(grid, peak, support, support_mult=support_mult)
     dv = np.clip(dt[valid], 0.0, float(max_cap) * (1.0 - 1e-7))
     bin_w = float(max_cap) / float(num_bins)
     idx = np.clip((dv / bin_w).astype(np.int64), 0, int(num_bins) - 1)
@@ -214,6 +260,7 @@ def _raw_source_signal_at_queries(
     kernel_eval_mode: str = "triangular_exact",
     kernel_num_bins: int = 20,
     kernel_max_cap: float | None = None,
+    kernel_support_mult: float = 3.0,
 ) -> np.ndarray:
     out = np.zeros((len(query_times),), dtype=np.float32)
     if len(query_times) == 0 or len(src_times) == 0:
@@ -240,6 +287,22 @@ def _raw_source_signal_at_queries(
                 num_bins=int(kernel_num_bins),
                 max_cap=max_cap,
             )
+        elif kernel_eval_mode == "gaussian_exact":
+            kvals = _gaussian_kernel(
+                dts,
+                peak,
+                width,
+                support_mult=float(kernel_support_mult),
+            )
+        elif kernel_eval_mode == "gaussian_pwlin":
+            kvals = _gaussian_piecewise_linear_kernel(
+                dts,
+                peak,
+                width,
+                num_bins=int(kernel_num_bins),
+                max_cap=max_cap,
+                support_mult=float(kernel_support_mult),
+            )
         else:
             raise ValueError(f"Unsupported source kernel eval mode: {kernel_eval_mode}")
         out[qi] = float(kvals.sum())
@@ -255,6 +318,7 @@ def _estimate_source_bounding(
     kernel_eval_mode: str = "triangular_exact",
     kernel_num_bins: int = 20,
     kernel_max_cap: float | None = None,
+    kernel_support_mult: float = 3.0,
 ) -> list[SourceDef]:
     source_defs: list[SourceDef] = []
     for stat in source_stats:
@@ -279,6 +343,7 @@ def _estimate_source_bounding(
                 kernel_eval_mode=kernel_eval_mode,
                 kernel_num_bins=int(kernel_num_bins),
                 kernel_max_cap=kernel_max_cap,
+                kernel_support_mult=float(kernel_support_mult),
             )
             if len(z) > 0:
                 target_z.append(z.astype(np.float64))
@@ -305,6 +370,7 @@ def _estimate_source_bounding(
                 kernel_eval_mode=str(kernel_eval_mode),
                 kernel_num_bins=int(kernel_num_bins),
                 kernel_max_cap=float(kernel_max_cap if kernel_max_cap is not None else width),
+                kernel_support_mult=float(kernel_support_mult),
             )
         )
     return source_defs
@@ -319,6 +385,7 @@ def phase2_source_evidence(
     kernel_eval_mode: str = "triangular_exact",
     kernel_num_bins: int = 20,
     kernel_max_cap: float | None = None,
+    kernel_support_mult: float = 3.0,
 ) -> dict:
     """Bounded per-source evidence q_s(t)."""
     _banner("Component Basis Phase 2: Bounded Source Evidence")
@@ -334,6 +401,7 @@ def phase2_source_evidence(
             if kernel_max_cap is not None
             else float(phase1_state.get("max_lag", 10.0))
         ),
+        kernel_support_mult=float(kernel_support_mult),
     )
     for sd in source_defs:
         print(
@@ -391,6 +459,7 @@ def _sequence_q_matrix(query_times: np.ndarray, event_times: np.ndarray, event_t
             kernel_eval_mode=str(sd.kernel_eval_mode),
             kernel_num_bins=int(sd.kernel_num_bins),
             kernel_max_cap=float(sd.kernel_max_cap),
+            kernel_support_mult=float(sd.kernel_support_mult),
         )
         q[:, j] = 1.0 - np.exp(-sd.alpha * np.maximum(z - sd.beta, 0.0))
     return np.clip(q, 0.0, 1.0)

@@ -18,6 +18,10 @@ datasets:
     data: /workspace/data/synthetic_custom_overlap_gaussian_fast.pkl
     config: /workspace/data/config_synthetic_custom_overlap_gaussian_fast.yaml
     description: Reduced-sample overlap synthetic with truncated Gaussian kernels.
+  gaussian_full:
+    data: /workspace/data/synthetic_custom_overlap_gaussian.pkl
+    config: /workspace/data/config_synthetic_custom_overlap_gaussian.yaml
+    description: Full overlap synthetic with truncated Gaussian kernels.
 
 methods:
   component_basis:
@@ -43,8 +47,11 @@ methods:
   stagewise_cell:
     script: /workspace/workspace/train/research_stagewise_cell_selectors.py
     status: retained_best
-    description: Stagewise residual exact-cell selector with hierarchical ownership.
-    default_args: []
+    description: Stagewise residual exact-cell selector with hierarchical ownership and piecewise-linear source-kernel approximation.
+    default_args:
+      - "--source_kernel_mode=triangular_pwlin"
+      - "--source_kernel_num_bins=50"
+      - "--source_kernel_support_mult=3.0"
   stagewise_rate:
     script: /workspace/workspace/train/research_stagewise_rate_selectors.py
     status: research
@@ -59,8 +66,9 @@ methods:
 current_best:
   method: stagewise_cell
   summary: >
-    Best retained exact top-k method so far. Observed best results are 7/7 on
-    triangle_fast and 6/7 on triangle_full.
+    Best retained exact top-k method so far. The default research path now uses
+    a piecewise-linear source-kernel approximation. Observed best results are
+    7/7 on triangle_fast and 6/7 on triangle_full.
   observed:
     triangle_fast:
       recall: "7/7"

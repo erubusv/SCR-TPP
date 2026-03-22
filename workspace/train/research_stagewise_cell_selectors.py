@@ -89,8 +89,13 @@ def main():
     ap.add_argument("--thr_values", default="0.05,0.15")
     ap.add_argument("--support_pow_values", default="1.0")
     ap.add_argument("--sup_pen_values", default="0.0,0.25,0.5,1.0")
-    ap.add_argument("--source_kernel_mode", choices=["triangular_exact", "triangular_pwlin"], default="triangular_exact")
-    ap.add_argument("--source_kernel_num_bins", type=int, default=20)
+    ap.add_argument(
+        "--source_kernel_mode",
+        choices=["triangular_exact", "triangular_pwlin", "gaussian_exact", "gaussian_pwlin"],
+        default="triangular_pwlin",
+    )
+    ap.add_argument("--source_kernel_num_bins", type=int, default=50)
+    ap.add_argument("--source_kernel_support_mult", type=float, default=3.0)
     ap.add_argument("--topn", type=int, default=40)
     args = ap.parse_args()
 
@@ -115,6 +120,7 @@ def main():
         fixed_target=int(args.fixed_target),
         kernel_eval_mode=str(args.source_kernel_mode),
         kernel_num_bins=int(args.source_kernel_num_bins),
+        kernel_support_mult=float(args.source_kernel_support_mult),
     )
     tr_cache = _build_source_cache(
         tr_data,
