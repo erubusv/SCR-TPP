@@ -1,0 +1,82 @@
+evaluation_protocol:
+  selection: exact_top_k_equals_ground_truth_count
+  description: >
+    Final overlap reports always keep exactly k predicted rules, where
+    k = len(gt_rules). Candidate sets may be larger internally, but every
+    final report is top-k only.
+
+datasets:
+  triangle_fast:
+    data: /workspace/data/synthetic_custom_overlap_fast.pkl
+    config: /workspace/data/config_synthetic_custom_overlap.yaml
+    description: Reduced-sample overlap synthetic with the same true rules as triangle_full.
+  triangle_full:
+    data: /workspace/data/synthetic_custom_overlap.pkl
+    config: /workspace/data/config_synthetic_custom_overlap.yaml
+    description: Full overlap synthetic with triangular kernels.
+  gaussian_fast:
+    data: /workspace/data/synthetic_custom_overlap_gaussian_fast.pkl
+    config: /workspace/data/config_synthetic_custom_overlap_gaussian_fast.yaml
+    description: Reduced-sample overlap synthetic with truncated Gaussian kernels.
+
+methods:
+  component_basis:
+    script: /workspace/workspace/train/ablate_component_basis.py
+    status: baseline
+    description: Component-basis prototype baseline.
+    default_args: []
+  hnstpp_overlap:
+    script: /workspace/workspace/train/ablate_custom_overlap.py
+    status: baseline
+    description: Original WH/HNSTPP overlap baseline.
+    default_args: []
+  exact_cell:
+    script: /workspace/workspace/train/research_exact_cell_selectors.py
+    status: research
+    description: Exact-cell selector with flat top-k ranking.
+    default_args: []
+  hierarchical_cell:
+    script: /workspace/workspace/train/research_hier_cell_selectors.py
+    status: research
+    description: Hierarchical exact-cell selector with mode mixing.
+    default_args: []
+  stagewise_cell:
+    script: /workspace/workspace/train/research_stagewise_cell_selectors.py
+    status: retained_best
+    description: Stagewise residual exact-cell selector with hierarchical ownership.
+    default_args: []
+  stagewise_rate:
+    script: /workspace/workspace/train/research_stagewise_rate_selectors.py
+    status: research
+    description: Stagewise selector using continuous-time cell-rate statistics.
+    default_args: []
+  channel_rate:
+    script: /workspace/workspace/train/research_channel_rate_selectors.py
+    status: research
+    description: Signed temporal-channel selector with continuous-time rate contrasts.
+    default_args: []
+
+current_best:
+  method: stagewise_cell
+  summary: >
+    Best retained exact top-k method so far. Observed best results are 7/7 on
+    triangle_fast and 6/7 on triangle_full.
+  observed:
+    triangle_fast:
+      recall: "7/7"
+      notes: Best retained fast result.
+      args:
+        - "--partition_mode=manual"
+        - "--mode_values=parent"
+        - "--thr_values=0.12,0.2"
+        - "--support_pow_values=1.0,1.25"
+        - "--sup_pen_values=1.5,2.0"
+    triangle_full:
+      recall: "6/7"
+      notes: Best retained full result.
+      args:
+        - "--partition_mode=manual"
+        - "--mode_values=parent"
+        - "--thr_values=0.25"
+        - "--support_pow_values=1.75,3.0"
+        - "--sup_pen_values=2.5,10.0"
