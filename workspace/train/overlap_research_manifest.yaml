@@ -22,6 +22,14 @@ datasets:
     data: /workspace/data/synthetic_custom_overlap_gaussian.pkl
     config: /workspace/data/config_synthetic_custom_overlap_gaussian.yaml
     description: Full overlap synthetic with truncated Gaussian kernels.
+  exponential_fast:
+    data: /workspace/data/synthetic_custom_overlap_exponential_fast.pkl
+    config: /workspace/data/config_synthetic_custom_overlap_exponential_fast.yaml
+    description: Reduced-sample overlap synthetic with shifted truncated exponential kernels.
+  exponential_full:
+    data: /workspace/data/synthetic_custom_overlap_exponential.pkl
+    config: /workspace/data/config_synthetic_custom_overlap_exponential.yaml
+    description: Full overlap synthetic with shifted truncated exponential kernels.
 
 methods:
   component_basis:

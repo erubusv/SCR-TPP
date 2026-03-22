@@ -31,6 +31,8 @@ class SourceDef:
     kernel_num_bins: int = 20
     kernel_max_cap: float = 10.0
     kernel_support_mult: float = 3.0
+    kernel_grid_x: tuple[float, ...] = ()
+    kernel_grid_y: tuple[float, ...] = ()
 
 
 @dataclass
@@ -123,6 +125,24 @@ def _triangular_piecewise_linear_kernel(
     return out
 
 
+def _generic_piecewise_linear_kernel(
+    dt: np.ndarray,
+    grid_x: np.ndarray,
+    grid_y: np.ndarray,
+    *,
+    max_cap: float,
+) -> np.ndarray:
+    out = np.zeros_like(dt, dtype=np.float64)
+    if grid_x.size < 2 or grid_y.size != grid_x.size or max_cap <= 1e-8:
+        return out
+    valid = (dt > 0.0) & (dt < max_cap)
+    if not np.any(valid):
+        return out
+    dv = np.clip(dt[valid], 0.0, float(max_cap))
+    out[valid] = np.interp(dv, grid_x, grid_y, left=0.0, right=0.0)
+    return out
+
+
 def _gaussian_kernel(
     dt: np.ndarray,
     peak: float,
@@ -160,6 +180,50 @@ def _gaussian_piecewise_linear_kernel(
         return out
     grid = np.linspace(0.0, float(max_cap), int(num_bins) + 1, dtype=np.float64)
     h = _gaussian_kernel(grid, peak, support, support_mult=support_mult)
+    dv = np.clip(dt[valid], 0.0, float(max_cap) * (1.0 - 1e-7))
+    bin_w = float(max_cap) / float(num_bins)
+    idx = np.clip((dv / bin_w).astype(np.int64), 0, int(num_bins) - 1)
+    frac = (dv / bin_w) - idx
+    out[valid] = h[idx] + (h[idx + 1] - h[idx]) * frac
+    return out
+
+
+def _exponential_kernel(
+    dt: np.ndarray,
+    peak: float,
+    support: float,
+    *,
+    support_mult: float,
+) -> np.ndarray:
+    out = np.zeros_like(dt, dtype=np.float64)
+    if support <= 1e-8:
+        return out
+    tau = max((float(support) - float(peak)) / max(float(support_mult), 1e-6), 1e-6)
+    valid = (dt > float(peak)) & (dt < support)
+    if not np.any(valid):
+        return out
+    dv = dt[valid]
+    out[valid] = np.exp(-(dv - float(peak)) / tau)
+    return out
+
+
+def _exponential_piecewise_linear_kernel(
+    dt: np.ndarray,
+    peak: float,
+    support: float,
+    *,
+    num_bins: int,
+    max_cap: float,
+    support_mult: float,
+) -> np.ndarray:
+    out = np.zeros_like(dt, dtype=np.float64)
+    if max_cap <= 1e-8 or num_bins <= 0:
+        return out
+    valid = (dt > 0.0) & (dt < max_cap)
+    if not np.any(valid):
+        return out
+    grid = np.linspace(0.0, float(max_cap), int(num_bins) + 1, dtype=np.float64)
+    h = _exponential_kernel(grid, peak, support, support_mult=support_mult)
     dv = np.clip(dt[valid], 0.0, float(max_cap) * (1.0 - 1e-7))
     bin_w = float(max_cap) / float(num_bins)
     idx = np.clip((dv / bin_w).astype(np.int64), 0, int(num_bins) - 1)
@@ -237,6 +301,8 @@ def phase1_pairwise_screen(
             "score": score,
             "peak": peak,
             "width": width,
+            "grid_x": np.concatenate([[0.0], centers, [max_lag]]).astype(np.float64),
+            "grid_y": np.concatenate([[0.0], np.clip(weights / max(weights.max(), 1e-8), 0.0, None), [0.0]]).astype(np.float64),
         })
 
     pair_stats.sort(key=lambda x: float(x["score"]), reverse=True)
@@ -261,6 +327,8 @@ def _raw_source_signal_at_queries(
     kernel_num_bins: int = 20,
     kernel_max_cap: float | None = None,
     kernel_support_mult: float = 3.0,
+    kernel_grid_x: np.ndarray | None = None,
+    kernel_grid_y: np.ndarray | None = None,
 ) -> np.ndarray:
     out = np.zeros((len(query_times),), dtype=np.float32)
     if len(query_times) == 0 or len(src_times) == 0:
@@ -296,6 +364,29 @@ def _raw_source_signal_at_queries(
             )
         elif kernel_eval_mode == "gaussian_pwlin":
             kvals = _gaussian_piecewise_linear_kernel(
+                dts,
+                peak,
+                width,
+                num_bins=int(kernel_num_bins),
+                max_cap=max_cap,
+                support_mult=float(kernel_support_mult),
+            )
+        elif kernel_eval_mode == "empirical_pwlin":
+            kvals = _generic_piecewise_linear_kernel(
+                dts,
+                np.asarray(kernel_grid_x if kernel_grid_x is not None else [], dtype=np.float64),
+                np.asarray(kernel_grid_y if kernel_grid_y is not None else [], dtype=np.float64),
+                max_cap=max_cap,
+            )
+        elif kernel_eval_mode == "exponential_exact":
+            kvals = _exponential_kernel(
+                dts,
+                peak,
+                width,
+                support_mult=float(kernel_support_mult),
+            )
+        elif kernel_eval_mode == "exponential_pwlin":
+            kvals = _exponential_piecewise_linear_kernel(
                 dts,
                 peak,
                 width,
@@ -344,6 +435,8 @@ def _estimate_source_bounding(
                 kernel_num_bins=int(kernel_num_bins),
                 kernel_max_cap=kernel_max_cap,
                 kernel_support_mult=float(kernel_support_mult),
+                kernel_grid_x=np.asarray(stat.get("grid_x", []), dtype=np.float64),
+                kernel_grid_y=np.asarray(stat.get("grid_y", []), dtype=np.float64),
             )
             if len(z) > 0:
                 target_z.append(z.astype(np.float64))
@@ -371,6 +464,8 @@ def _estimate_source_bounding(
                 kernel_num_bins=int(kernel_num_bins),
                 kernel_max_cap=float(kernel_max_cap if kernel_max_cap is not None else width),
                 kernel_support_mult=float(kernel_support_mult),
+                kernel_grid_x=tuple(float(x) for x in np.asarray(stat.get("grid_x", []), dtype=np.float64)),
+                kernel_grid_y=tuple(float(x) for x in np.asarray(stat.get("grid_y", []), dtype=np.float64)),
             )
         )
     return source_defs
@@ -460,6 +555,8 @@ def _sequence_q_matrix(query_times: np.ndarray, event_times: np.ndarray, event_t
             kernel_num_bins=int(sd.kernel_num_bins),
             kernel_max_cap=float(sd.kernel_max_cap),
             kernel_support_mult=float(sd.kernel_support_mult),
+            kernel_grid_x=np.asarray(sd.kernel_grid_x, dtype=np.float64),
+            kernel_grid_y=np.asarray(sd.kernel_grid_y, dtype=np.float64),
         )
         q[:, j] = 1.0 - np.exp(-sd.alpha * np.maximum(z - sd.beta, 0.0))
     return np.clip(q, 0.0, 1.0)

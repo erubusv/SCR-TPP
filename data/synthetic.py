@@ -50,6 +50,25 @@ def gaussian_kernel_func(dt, peak, sigma, mix_weight, support_mult):
     return mix_weight * np.exp(-0.5 * z * z)
 
 
+@njit(fastmath=True, cache=True, inline='always')
+def exponential_kernel_func(dt, peak, tau, mix_weight, support_mult):
+    """Shifted truncated exponential with onset/peak at `peak` and scale `tau`.
+
+    The kernel is zero outside [peak, peak + support_mult * tau].
+    Width in config is interpreted as tau for exponential kernels.
+    """
+    if dt <= peak:
+        return 0.0
+
+    eps = 1e-12
+    tau = max(tau, eps)
+    support = peak + max(support_mult, 0.0) * tau
+    if dt > support:
+        return 0.0
+    z = (dt - peak) / tau
+    return mix_weight * np.exp(-z)
+
+
 class Rule:
     """Rule container used by the synthetic generator."""
 
@@ -124,6 +143,8 @@ class Rule:
                         val = triangular_kernel_func(dt, peak, width, mix_weight)
                     elif self.kernel_type == 'gaussian':
                         val = gaussian_kernel_func(dt, peak, width, mix_weight, support_mult)
+                    elif self.kernel_type == 'exponential':
+                        val = exponential_kernel_func(dt, peak, width, mix_weight, support_mult)
                     else:
                         val = triangular_kernel_func(dt, peak, width, mix_weight)
                     kernel_sum += val

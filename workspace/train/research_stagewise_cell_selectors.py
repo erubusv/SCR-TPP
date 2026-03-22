@@ -91,7 +91,15 @@ def main():
     ap.add_argument("--sup_pen_values", default="0.0,0.25,0.5,1.0")
     ap.add_argument(
         "--source_kernel_mode",
-        choices=["triangular_exact", "triangular_pwlin", "gaussian_exact", "gaussian_pwlin"],
+        choices=[
+            "triangular_exact",
+            "triangular_pwlin",
+            "gaussian_exact",
+            "gaussian_pwlin",
+            "exponential_exact",
+            "exponential_pwlin",
+            "empirical_pwlin",
+        ],
         default="triangular_pwlin",
     )
     ap.add_argument("--source_kernel_num_bins", type=int, default=50)
