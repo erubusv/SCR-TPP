@@ -60,6 +60,7 @@ def wiener_hopf_initialize(
     phase6_family_conflict_penalty: float = 0.35,
     phase4_fixed_kernel_shape: str = "flat",
     phase4_fixed_kernel_peak: float = 1.0,
+    phase4_fixed_kernel_width: float = 3.0,
     phase4_fixed_kernel_sigma: float = 0.75,
     phase4_fixed_kernel_amp: float = 0.5,
     phase4_fixed_kernel_trunc_mult: float = 3.0,
@@ -172,12 +173,24 @@ def wiener_hopf_initialize(
     P_event, P_int, meta = _phase4_cache_features(
         candidates, train_data, D, model, device, int_grid_mult,
         source_cap=phase4_source_cap,
+        phase4_fixed_kernel_shape=phase4_fixed_kernel_shape,
+        phase4_fixed_kernel_peak=phase4_fixed_kernel_peak,
+        phase4_fixed_kernel_width=phase4_fixed_kernel_width,
+        phase4_fixed_kernel_sigma=phase4_fixed_kernel_sigma,
+        phase4_fixed_kernel_amp=phase4_fixed_kernel_amp,
+        phase4_fixed_kernel_trunc_mult=phase4_fixed_kernel_trunc_mult,
     )
     val_cache = None
     if len(val_data) > 0:
         Pv_event, Pv_int, meta_v = _phase4_cache_features(
             candidates, val_data, D, model, device, int_grid_mult=2,
             source_cap=phase4_source_cap,
+            phase4_fixed_kernel_shape=phase4_fixed_kernel_shape,
+            phase4_fixed_kernel_peak=phase4_fixed_kernel_peak,
+            phase4_fixed_kernel_width=phase4_fixed_kernel_width,
+            phase4_fixed_kernel_sigma=phase4_fixed_kernel_sigma,
+            phase4_fixed_kernel_amp=phase4_fixed_kernel_amp,
+            phase4_fixed_kernel_trunc_mult=phase4_fixed_kernel_trunc_mult,
         )
         val_cache = {
             'P_event': Pv_event,
@@ -210,6 +223,7 @@ def wiener_hopf_initialize(
         fixed_target=fixed_target,
         phase4_fixed_kernel_shape=phase4_fixed_kernel_shape,
         phase4_fixed_kernel_peak=phase4_fixed_kernel_peak,
+        phase4_fixed_kernel_width=phase4_fixed_kernel_width,
         phase4_fixed_kernel_sigma=phase4_fixed_kernel_sigma,
         phase4_fixed_kernel_amp=phase4_fixed_kernel_amp,
         phase4_fixed_kernel_trunc_mult=phase4_fixed_kernel_trunc_mult,
@@ -1080,6 +1094,7 @@ def _phase4_cache_features(
     source_cap: float | None = None,
     phase4_fixed_kernel_shape: str = "flat",
     phase4_fixed_kernel_peak: float = 1.0,
+    phase4_fixed_kernel_width: float = 3.0,
     phase4_fixed_kernel_sigma: float = 0.75,
     phase4_fixed_kernel_amp: float = 0.5,
     phase4_fixed_kernel_trunc_mult: float = 3.0,
@@ -1182,6 +1197,7 @@ def _phase4_cache_features(
         shape=kernel_shape,
         amp=float(phase4_fixed_kernel_amp),
         peak=float(phase4_fixed_kernel_peak),
+        width=float(phase4_fixed_kernel_width),
         sigma=float(phase4_fixed_kernel_sigma),
         trunc_mult=float(phase4_fixed_kernel_trunc_mult),
     )
@@ -1197,6 +1213,7 @@ def _phase4_cache_features(
             shape=kernel_shape,
             amp=float(phase4_fixed_kernel_amp),
             peak=float(phase4_fixed_kernel_peak),
+            width=float(phase4_fixed_kernel_width),
             sigma=float(phase4_fixed_kernel_sigma),
             trunc_mult=float(phase4_fixed_kernel_trunc_mult),
         )
@@ -2020,6 +2037,7 @@ def _phase6_refit_and_inject(
     fixed_target: int | None = None,
     phase4_fixed_kernel_shape: str = "flat",
     phase4_fixed_kernel_peak: float = 1.0,
+    phase4_fixed_kernel_width: float = 3.0,
     phase4_fixed_kernel_sigma: float = 0.75,
     phase4_fixed_kernel_amp: float = 0.5,
     phase4_fixed_kernel_trunc_mult: float = 3.0,
@@ -2559,6 +2577,7 @@ def _phase6_refit_and_inject(
             shape=kernel_shape,
             amp=float(phase4_fixed_kernel_amp),
             peak=float(phase4_fixed_kernel_peak),
+            width=float(phase4_fixed_kernel_width),
             sigma=float(phase4_fixed_kernel_sigma),
             trunc_mult=float(phase4_fixed_kernel_trunc_mult),
         )
@@ -2751,6 +2770,7 @@ def _build_fixed_kernel_grid(
     shape: str,
     amp: float,
     peak: float,
+    width: float,
     sigma: float,
     trunc_mult: float,
 ) -> np.ndarray:
@@ -2761,6 +2781,20 @@ def _build_fixed_kernel_grid(
         return h_full
 
     grid = np.linspace(0.0, float(max_cap), num_bins + 1, dtype=np.float32)
+    if shape == "triangular":
+        support = min(float(max_cap), max(float(width), 1e-6))
+        peak = float(np.clip(float(peak), 1e-6, max(support - 1e-6, 1e-6)))
+        vals = np.zeros_like(grid, dtype=np.float32)
+        left = (grid > 0.0) & (grid <= peak)
+        right = (grid > peak) & (grid < support)
+        vals[left] = float(amp) * (grid[left] / max(peak, 1e-6))
+        vals[right] = float(amp) * ((support - grid[right]) / max(support - peak, 1e-6))
+        vals[(grid <= 0.0) | (grid >= support)] = 0.0
+        h_full[:] = vals
+        h_full[0] = 0.0
+        h_full[-1] = 0.0
+        return h_full
+
     if shape == "gaussian":
         support = min(float(max_cap), float(peak) + max(float(trunc_mult), 0.0) * max(float(sigma), 1e-6))
         z = (grid - float(peak)) / max(float(sigma), 1e-6)
@@ -2783,12 +2817,16 @@ def _eval_fixed_kernel_np(
     shape: str,
     amp: float,
     peak: float,
+    width: float,
     sigma: float,
     trunc_mult: float,
 ) -> np.ndarray:
-    if shape not in ("flat", "gaussian"):
+    if shape not in ("flat", "gaussian", "triangular"):
         raise ValueError(f"Unsupported fixed kernel shape: {shape}")
     valid = (dt_arr >= 0) & (dt_arr < max_cap)
+    if shape == "triangular":
+        support = min(float(max_cap), max(float(width), 1e-6))
+        valid = valid & (dt_arr <= support)
     if shape == "gaussian":
         support = min(float(max_cap), float(peak) + max(float(trunc_mult), 0.0) * max(float(sigma), 1e-6))
         valid = valid & (dt_arr <= support)
@@ -2808,6 +2846,7 @@ def _fixed_kernel_heights_from_shape(
     shape: str,
     amp: float,
     peak: float,
+    width: float,
     sigma: float,
     trunc_mult: float,
 ) -> torch.Tensor:
@@ -2817,6 +2856,7 @@ def _fixed_kernel_heights_from_shape(
         shape=shape,
         amp=amp,
         peak=peak,
+        width=width,
         sigma=sigma,
         trunc_mult=trunc_mult,
     )

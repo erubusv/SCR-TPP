@@ -211,6 +211,7 @@ def main():
     ap.add_argument("--wh_phase4_source_cap", type=float, default=None)
     ap.add_argument("--wh_phase4_fixed_kernel_shape", type=str, default="flat")
     ap.add_argument("--wh_phase4_fixed_kernel_peak", type=float, default=1.0)
+    ap.add_argument("--wh_phase4_fixed_kernel_width", type=float, default=3.0)
     ap.add_argument("--wh_phase4_fixed_kernel_sigma", type=float, default=0.75)
     ap.add_argument("--wh_phase4_fixed_kernel_amp", type=float, default=0.5)
     ap.add_argument("--wh_phase4_fixed_kernel_trunc_mult", type=float, default=3.0)
@@ -246,6 +247,7 @@ def main():
         phase4_source_cap=args.wh_phase4_source_cap,
         phase4_fixed_kernel_shape=str(args.wh_phase4_fixed_kernel_shape),
         phase4_fixed_kernel_peak=float(args.wh_phase4_fixed_kernel_peak),
+        phase4_fixed_kernel_width=float(args.wh_phase4_fixed_kernel_width),
         phase4_fixed_kernel_sigma=float(args.wh_phase4_fixed_kernel_sigma),
         phase4_fixed_kernel_amp=float(args.wh_phase4_fixed_kernel_amp),
         phase4_fixed_kernel_trunc_mult=float(args.wh_phase4_fixed_kernel_trunc_mult),
