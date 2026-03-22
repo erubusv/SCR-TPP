@@ -213,6 +213,10 @@ def estimate_channel_bounding(
     *,
     fixed_target: int,
     beta_quantile: float = 0.6,
+    kernel_eval_mode: str = "triangular_exact",
+    kernel_num_bins: int = 20,
+    kernel_max_cap: float | None = None,
+    kernel_support_mult: float = 3.0,
 ) -> list[ChannelDef]:
     out = []
     for ch in channels:
@@ -226,7 +230,16 @@ def estimate_channel_bounding(
             tgt_times = t[e == int(fixed_target)]
             if len(src_times) == 0 or len(tgt_times) == 0:
                 continue
-            z = _raw_source_signal_at_queries(tgt_times, src_times, ch.peak, ch.width)
+            z = _raw_source_signal_at_queries(
+                tgt_times,
+                src_times,
+                ch.peak,
+                ch.width,
+                kernel_eval_mode=str(kernel_eval_mode),
+                kernel_num_bins=int(kernel_num_bins),
+                kernel_max_cap=kernel_max_cap,
+                kernel_support_mult=float(kernel_support_mult),
+            )
             if len(z) > 0:
                 vals.append(z.astype(np.float64))
         if vals:
@@ -263,6 +276,10 @@ def build_channel_cache(
     fixed_target: int,
     num_types: int,
     int_grid_mult: int = 1,
+    kernel_eval_mode: str = "triangular_exact",
+    kernel_num_bins: int = 20,
+    kernel_max_cap: float | None = None,
+    kernel_support_mult: float = 3.0,
 ) -> dict:
     from workspace.train.component_basis_init import _build_query_grid
 
@@ -279,7 +296,16 @@ def build_channel_cache(
             src_times = event_times[event_types == int(ch.source)]
             if len(src_times) == 0:
                 continue
-            z = _raw_source_signal_at_queries(query_times, src_times, ch.peak, ch.width)
+            z = _raw_source_signal_at_queries(
+                query_times,
+                src_times,
+                ch.peak,
+                ch.width,
+                kernel_eval_mode=str(kernel_eval_mode),
+                kernel_num_bins=int(kernel_num_bins),
+                kernel_max_cap=kernel_max_cap,
+                kernel_support_mult=float(kernel_support_mult),
+            )
             q[:, j] = 1.0 - np.exp(-ch.alpha * np.maximum(z - ch.beta, 0.0))
         return np.clip(q, 0.0, 1.0)
 

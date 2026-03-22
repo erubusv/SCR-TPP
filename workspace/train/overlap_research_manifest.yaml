@@ -65,6 +65,14 @@ methods:
     status: research
     description: Stagewise selector using continuous-time cell-rate statistics.
     default_args: []
+  stagewise_multichannel_cell:
+    script: /workspace/workspace/train/research_stagewise_multichannel_cell_selectors.py
+    status: research
+    description: Stagewise exact-cell selector with signed multichannel source evidence.
+    default_args:
+      - "--source_kernel_mode=triangular_pwlin"
+      - "--source_kernel_num_bins=50"
+      - "--source_kernel_support_mult=3.0"
   channel_rate:
     script: /workspace/workspace/train/research_channel_rate_selectors.py
     status: research
