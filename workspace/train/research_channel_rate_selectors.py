@@ -36,6 +36,27 @@ class ChannelDef:
     alpha: float
 
 
+def _single_channel_stat(
+    centers: np.ndarray,
+    excess: np.ndarray,
+    *,
+    delta_t: float,
+    max_lag: float,
+) -> dict:
+    weights = np.abs(excess)
+    score = float(weights.sum())
+    if score <= 1e-8:
+        peak = max(float(delta_t), 0.5)
+        width = min(float(max_lag), max(1.5 * peak, 1.0))
+    else:
+        mu = float((centers * weights).sum() / max(weights.sum(), 1e-8))
+        var = float((((centers - mu) ** 2) * weights).sum() / max(weights.sum(), 1e-8))
+        sigma = max(math.sqrt(max(var, 1e-8)), float(delta_t))
+        peak = float(np.clip(mu, float(delta_t), float(max_lag) * 0.8))
+        width = float(np.clip(mu + 2.0 * sigma, peak + float(delta_t), float(max_lag)))
+    return {"score": score, "peak": peak, "width": width}
+
+
 def load_yaml(path: str):
     with open(path, "r") as f:
         return yaml.safe_load(f)
@@ -129,12 +150,73 @@ def strongest_signed_lobes(
                 "score": mass,
                 "peak": peak,
                 "width": width,
+                "mu": mu,
+                "sigma": sigma,
             }
             if best is None or float(row["score"]) > float(best["score"]):
                 best = row
         if best is not None:
             out.append(best)
     return out
+
+
+def _split_gain_for_source(
+    train_data: list[dict],
+    val_data: list[dict],
+    *,
+    fixed_target: int,
+    src: int,
+    single_stat: dict,
+    lobes: list[dict],
+    beta_quantile: float,
+    split_thr: float,
+    kernel_eval_mode: str,
+    kernel_num_bins: int,
+    kernel_max_cap: float | None,
+    kernel_support_mult: float,
+) -> float:
+    del train_data
+    del single_stat
+    del beta_quantile
+    del split_thr
+    del kernel_eval_mode
+    del kernel_num_bins
+    del kernel_max_cap
+    del kernel_support_mult
+
+    if len(lobes) < 2 or len(val_data) == 0:
+        return 0.0
+    num_types = max(int(fixed_target) + 1, int(src) + 1, 1)
+    for item in val_data:
+        e = np.asarray(item["event"], dtype=np.int64)
+        if len(e) > 0:
+            num_types = max(num_types, int(e.max()) + 1)
+    centers, val_excess = pair_excess_hist(
+        val_data,
+        int(num_types),
+        int(src),
+        int(fixed_target),
+        delta_t=0.1,
+        max_lag=10.0,
+    )
+    total_val = float(np.abs(val_excess).sum())
+    if total_val <= 1e-8:
+        return 0.0
+    aligned = []
+    for lobe in lobes[:2]:
+        mu = float(lobe["mu"])
+        sigma = float(lobe["sigma"])
+        lo = mu - 2.0 * sigma
+        hi = mu + 2.0 * sigma
+        mask = (centers >= lo) & (centers <= hi)
+        if int(lobe["sign_prior"]) > 0:
+            mass = float(np.maximum(val_excess[mask], 0.0).sum())
+        else:
+            mass = float(np.maximum(-val_excess[mask], 0.0).sum())
+        aligned.append(mass)
+    if len(aligned) < 2:
+        return 0.0
+    return float(min(aligned) / max(total_val, 1e-8))
 
 
 def phase1_multichannel_screen(
@@ -146,6 +228,17 @@ def phase1_multichannel_screen(
     max_lag: float,
     source_pool_topk: int,
     min_mass_frac: float,
+    val_data_list: list[dict] | None = None,
+    adaptive_split: bool = False,
+    conflict_balance_min: float = 0.0,
+    conflict_sep_min: float = 0.0,
+    conflict_gain_min: float = 0.0,
+    split_thr: float = 0.2,
+    beta_quantile: float = 0.6,
+    kernel_eval_mode: str = "triangular_exact",
+    kernel_num_bins: int = 20,
+    kernel_max_cap: float | None = None,
+    kernel_support_mult: float = 3.0,
 ) -> dict:
     rates, total_time = _estimate_base_rates(data_list, num_types)
     pair_scores = []
@@ -167,6 +260,7 @@ def phase1_multichannel_screen(
 
     channels: list[ChannelDef] = []
     next_id = 0
+    source_summaries = []
     for row in pair_scores:
         src = int(row["source"])
         centers, excess = pair_excess_hist(
@@ -184,15 +278,92 @@ def phase1_multichannel_screen(
             max_lag=max_lag,
             min_mass_frac=float(min_mass_frac),
         )
-        for lobe in lobes:
+        single_stat = _single_channel_stat(
+            centers,
+            excess,
+            delta_t=float(delta_t),
+            max_lag=float(max_lag),
+        )
+        score_map = {int(l["sign_prior"]): float(l["score"]) for l in lobes}
+        pos = float(score_map.get(1, 0.0))
+        neg = float(score_map.get(-1, 0.0))
+        balance = float(min(pos, neg) / max(pos + neg, 1e-8))
+        if len(lobes) >= 2:
+            pos_lobe = next((l for l in lobes if int(l["sign_prior"]) == 1), None)
+            neg_lobe = next((l for l in lobes if int(l["sign_prior"]) == -1), None)
+            if pos_lobe is not None and neg_lobe is not None:
+                sep = abs(float(pos_lobe["mu"]) - float(neg_lobe["mu"])) / max(
+                    math.sqrt(float(pos_lobe["sigma"]) ** 2 + float(neg_lobe["sigma"]) ** 2),
+                    1e-6,
+                )
+            else:
+                sep = 0.0
+        else:
+            sep = 0.0
+        gain = 0.0
+        use_split = len(lobes) >= 2
+        if bool(adaptive_split):
+            gain = _split_gain_for_source(
+                data_list,
+                data_list if val_data_list is None else val_data_list,
+                fixed_target=int(fixed_target),
+                src=int(src),
+                single_stat=single_stat,
+                lobes=lobes,
+                beta_quantile=float(beta_quantile),
+                split_thr=float(split_thr),
+                kernel_eval_mode=str(kernel_eval_mode),
+                kernel_num_bins=int(kernel_num_bins),
+                kernel_max_cap=kernel_max_cap,
+                kernel_support_mult=float(kernel_support_mult),
+            )
+            use_split = (
+                len(lobes) >= 2
+                and balance >= float(conflict_balance_min)
+                and sep >= float(conflict_sep_min)
+                and gain >= float(conflict_gain_min)
+            )
+        source_summaries.append(
+            {
+                "source": int(src),
+                "single_score": float(single_stat["score"]),
+                "mneg": neg,
+                "mpos": pos,
+                "balance": balance,
+                "separation": float(sep),
+                "gain": float(gain),
+                "mode": "split" if use_split else "single",
+            }
+        )
+        if use_split:
+            for lobe in lobes:
+                channels.append(
+                    ChannelDef(
+                        source=src,
+                        channel_id=next_id,
+                        sign_prior=int(lobe["sign_prior"]),
+                        score=float(lobe["score"]),
+                        peak=float(lobe["peak"]),
+                        width=float(lobe["width"]),
+                        beta=0.0,
+                        alpha=1.0,
+                    )
+                )
+                next_id += 1
+        else:
+            dom_sign = 0
+            if pos > neg:
+                dom_sign = 1
+            elif neg > pos:
+                dom_sign = -1
             channels.append(
                 ChannelDef(
                     source=src,
                     channel_id=next_id,
-                    sign_prior=int(lobe["sign_prior"]),
-                    score=float(lobe["score"]),
-                    peak=float(lobe["peak"]),
-                    width=float(lobe["width"]),
+                    sign_prior=int(dom_sign),
+                    score=float(single_stat["score"]),
+                    peak=float(single_stat["peak"]),
+                    width=float(single_stat["width"]),
                     beta=0.0,
                     alpha=1.0,
                 )
@@ -204,6 +375,7 @@ def phase1_multichannel_screen(
         "total_time": total_time,
         "pair_scores": pair_scores,
         "channels": channels,
+        "source_summaries": source_summaries,
     }
 
 

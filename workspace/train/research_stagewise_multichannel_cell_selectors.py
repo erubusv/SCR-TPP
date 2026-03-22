@@ -154,6 +154,11 @@ def main():
     ap.add_argument("--max_lag", type=float, default=10.0)
     ap.add_argument("--source_pool_topk", type=int, default=8)
     ap.add_argument("--min_mass_frac", type=float, default=0.01)
+    ap.add_argument("--adaptive_split", action="store_true")
+    ap.add_argument("--conflict_balance_min", type=float, default=0.0)
+    ap.add_argument("--conflict_sep_min", type=float, default=0.0)
+    ap.add_argument("--conflict_gain_min", type=float, default=0.0)
+    ap.add_argument("--split_thr", type=float, default=0.2)
     ap.add_argument(
         "--source_kernel_mode",
         choices=[
@@ -176,6 +181,7 @@ def main():
     gt = gt_rules_from_config(cfg)
     num_types = int(metadata["num_types"])
     n_val = min(max(1, int(len(train_data) * 0.15)), len(train_data) - 1)
+    va_data = train_data[:n_val]
     tr_data = train_data[n_val:]
 
     phase1 = phase1_multichannel_screen(
@@ -186,6 +192,16 @@ def main():
         max_lag=float(args.max_lag),
         source_pool_topk=int(args.source_pool_topk),
         min_mass_frac=float(args.min_mass_frac),
+        val_data_list=va_data,
+        adaptive_split=bool(args.adaptive_split),
+        conflict_balance_min=float(args.conflict_balance_min),
+        conflict_sep_min=float(args.conflict_sep_min),
+        conflict_gain_min=float(args.conflict_gain_min),
+        split_thr=float(args.split_thr),
+        kernel_eval_mode=str(args.source_kernel_mode),
+        kernel_num_bins=int(args.source_kernel_num_bins),
+        kernel_max_cap=float(args.max_lag),
+        kernel_support_mult=float(args.source_kernel_support_mult),
     )
     channels = estimate_channel_bounding(
         tr_data,
@@ -218,6 +234,7 @@ def main():
     )
     print(f"partition_mode={args.partition_mode} num_partitions={len(components_list)}")
     print("source_pool:", list(source_ids))
+    print("source_summaries:", phase1.get("source_summaries", []))
     print(
         "channels:",
         [
