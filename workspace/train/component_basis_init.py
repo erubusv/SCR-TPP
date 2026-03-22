@@ -27,6 +27,9 @@ class SourceDef:
     width: float
     beta: float
     alpha: float
+    kernel_eval_mode: str = "triangular_exact"
+    kernel_num_bins: int = 20
+    kernel_max_cap: float = 10.0
 
 
 @dataclass
@@ -92,6 +95,30 @@ def _triangular_kernel(dt: np.ndarray, peak: float, width: float) -> np.ndarray:
     vals[left] = dv[left] / peak
     vals[~left] = (width - dv[~left]) / max(width - peak, 1e-6)
     out[valid] = np.clip(vals, 0.0, 1.0)
+    return out
+
+
+def _triangular_piecewise_linear_kernel(
+    dt: np.ndarray,
+    peak: float,
+    width: float,
+    *,
+    num_bins: int,
+    max_cap: float,
+) -> np.ndarray:
+    out = np.zeros_like(dt, dtype=np.float64)
+    if max_cap <= 1e-8 or num_bins <= 0:
+        return out
+    valid = (dt > 0.0) & (dt < max_cap)
+    if not np.any(valid):
+        return out
+    grid = np.linspace(0.0, float(max_cap), int(num_bins) + 1, dtype=np.float64)
+    h = _triangular_kernel(grid, peak, width)
+    dv = np.clip(dt[valid], 0.0, float(max_cap) * (1.0 - 1e-7))
+    bin_w = float(max_cap) / float(num_bins)
+    idx = np.clip((dv / bin_w).astype(np.int64), 0, int(num_bins) - 1)
+    frac = (dv / bin_w) - idx
+    out[valid] = h[idx] + (h[idx + 1] - h[idx]) * frac
     return out
 
 
@@ -173,14 +200,25 @@ def phase1_pairwise_screen(
     return {
         "base_rates": rates,
         "total_time": total_time,
+        "max_lag": float(max_lag),
         "pair_stats": pair_stats,
     }
 
 
-def _raw_source_signal_at_queries(query_times: np.ndarray, src_times: np.ndarray, peak: float, width: float) -> np.ndarray:
+def _raw_source_signal_at_queries(
+    query_times: np.ndarray,
+    src_times: np.ndarray,
+    peak: float,
+    width: float,
+    *,
+    kernel_eval_mode: str = "triangular_exact",
+    kernel_num_bins: int = 20,
+    kernel_max_cap: float | None = None,
+) -> np.ndarray:
     out = np.zeros((len(query_times),), dtype=np.float32)
     if len(query_times) == 0 or len(src_times) == 0:
         return out
+    max_cap = float(kernel_max_cap if kernel_max_cap is not None else max(width, 1e-6))
     left = 0
     right = 0
     n_src = len(src_times)
@@ -192,7 +230,19 @@ def _raw_source_signal_at_queries(query_times: np.ndarray, src_times: np.ndarray
         if right <= left:
             continue
         dts = q - src_times[left:right]
-        out[qi] = float(_triangular_kernel(dts, peak, width).sum())
+        if kernel_eval_mode == "triangular_exact":
+            kvals = _triangular_kernel(dts, peak, width)
+        elif kernel_eval_mode == "triangular_pwlin":
+            kvals = _triangular_piecewise_linear_kernel(
+                dts,
+                peak,
+                width,
+                num_bins=int(kernel_num_bins),
+                max_cap=max_cap,
+            )
+        else:
+            raise ValueError(f"Unsupported source kernel eval mode: {kernel_eval_mode}")
+        out[qi] = float(kvals.sum())
     return out
 
 
@@ -202,6 +252,9 @@ def _estimate_source_bounding(
     *,
     fixed_target: int,
     beta_quantile: float = 0.6,
+    kernel_eval_mode: str = "triangular_exact",
+    kernel_num_bins: int = 20,
+    kernel_max_cap: float | None = None,
 ) -> list[SourceDef]:
     source_defs: list[SourceDef] = []
     for stat in source_stats:
@@ -218,7 +271,15 @@ def _estimate_source_bounding(
             tgt_times = times[events == int(fixed_target)]
             if len(src_times) == 0 or len(tgt_times) == 0:
                 continue
-            z = _raw_source_signal_at_queries(tgt_times, src_times, peak, width)
+            z = _raw_source_signal_at_queries(
+                tgt_times,
+                src_times,
+                peak,
+                width,
+                kernel_eval_mode=kernel_eval_mode,
+                kernel_num_bins=int(kernel_num_bins),
+                kernel_max_cap=kernel_max_cap,
+            )
             if len(z) > 0:
                 target_z.append(z.astype(np.float64))
         if target_z:
@@ -241,6 +302,9 @@ def _estimate_source_bounding(
                 width=width,
                 beta=beta,
                 alpha=alpha,
+                kernel_eval_mode=str(kernel_eval_mode),
+                kernel_num_bins=int(kernel_num_bins),
+                kernel_max_cap=float(kernel_max_cap if kernel_max_cap is not None else width),
             )
         )
     return source_defs
@@ -252,6 +316,9 @@ def phase2_source_evidence(
     *,
     fixed_target: int,
     beta_quantile: float = 0.6,
+    kernel_eval_mode: str = "triangular_exact",
+    kernel_num_bins: int = 20,
+    kernel_max_cap: float | None = None,
 ) -> dict:
     """Bounded per-source evidence q_s(t)."""
     _banner("Component Basis Phase 2: Bounded Source Evidence")
@@ -260,6 +327,13 @@ def phase2_source_evidence(
         phase1_state["pair_stats"],
         fixed_target=fixed_target,
         beta_quantile=beta_quantile,
+        kernel_eval_mode=kernel_eval_mode,
+        kernel_num_bins=kernel_num_bins,
+        kernel_max_cap=(
+            float(kernel_max_cap)
+            if kernel_max_cap is not None
+            else float(phase1_state.get("max_lag", 10.0))
+        ),
     )
     for sd in source_defs:
         print(
@@ -309,7 +383,15 @@ def _sequence_q_matrix(query_times: np.ndarray, event_times: np.ndarray, event_t
         src_times = event_times[event_types == int(sd.source)]
         if len(src_times) == 0:
             continue
-        z = _raw_source_signal_at_queries(query_times, src_times, sd.peak, sd.width)
+        z = _raw_source_signal_at_queries(
+            query_times,
+            src_times,
+            sd.peak,
+            sd.width,
+            kernel_eval_mode=str(sd.kernel_eval_mode),
+            kernel_num_bins=int(sd.kernel_num_bins),
+            kernel_max_cap=float(sd.kernel_max_cap),
+        )
         q[:, j] = 1.0 - np.exp(-sd.alpha * np.maximum(z - sd.beta, 0.0))
     return np.clip(q, 0.0, 1.0)
 

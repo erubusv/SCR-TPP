@@ -89,6 +89,8 @@ def main():
     ap.add_argument("--thr_values", default="0.05,0.15")
     ap.add_argument("--support_pow_values", default="1.0")
     ap.add_argument("--sup_pen_values", default="0.0,0.25,0.5,1.0")
+    ap.add_argument("--source_kernel_mode", choices=["triangular_exact", "triangular_pwlin"], default="triangular_exact")
+    ap.add_argument("--source_kernel_num_bins", type=int, default=20)
     ap.add_argument("--topn", type=int, default=40)
     args = ap.parse_args()
 
@@ -107,7 +109,13 @@ def main():
         max_lag=10.0,
         source_pool_topk=8,
     )
-    phase2 = phase2_source_evidence(tr_data, phase1, fixed_target=int(args.fixed_target))
+    phase2 = phase2_source_evidence(
+        tr_data,
+        phase1,
+        fixed_target=int(args.fixed_target),
+        kernel_eval_mode=str(args.source_kernel_mode),
+        kernel_num_bins=int(args.source_kernel_num_bins),
+    )
     tr_cache = _build_source_cache(
         tr_data,
         phase2["source_defs"],
