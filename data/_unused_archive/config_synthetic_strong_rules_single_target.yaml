@@ -1,0 +1,124 @@
+# Strongly discriminative synthetic data (single fixed target)
+# single / pair / triplet x excitation / inhibition
+
+time_horizon: 90.0
+num_event_types: 13
+num_samples: 1500
+max_len: 256
+
+# Sources: 0~11 (moderate base rates)
+# Fixed target: 12 (low base rate)
+base_intensity:
+  0: 0.13
+  1: 0.13
+  2: 0.12
+  3: 0.12
+  4: 0.12
+  5: 0.12
+  6: 0.11
+  7: 0.11
+  8: 0.11
+  9: 0.11
+  10: 0.10
+  11: 0.10
+  12: 0.03
+
+rules:
+  # single excitation
+  - id: 0
+    target: 12
+    W_pos: 4.0
+    W_neg: 0.0
+    bias: 0.0
+    condition:
+      0:
+        peaks: [0.7]
+        widths: [1.8]
+        mix_weights: [1.0]
+
+  # single inhibition
+  - id: 1
+    target: 12
+    W_pos: 0.0
+    W_neg: 3.8
+    bias: 0.0
+    condition:
+      1:
+        peaks: [0.7]
+        widths: [1.8]
+        mix_weights: [1.0]
+
+  # pair excitation
+  - id: 2
+    target: 12
+    W_pos: 4.5
+    W_neg: 0.0
+    bias: 1.05
+    condition:
+      2:
+        peaks: [0.9]
+        widths: [2.2]
+        mix_weights: [1.0]
+      3:
+        peaks: [0.9]
+        widths: [2.2]
+        mix_weights: [1.0]
+
+  # pair inhibition
+  - id: 3
+    target: 12
+    W_pos: 0.0
+    W_neg: 4.5
+    bias: 1.05
+    condition:
+      4:
+        peaks: [0.9]
+        widths: [2.2]
+        mix_weights: [1.0]
+      5:
+        peaks: [0.9]
+        widths: [2.2]
+        mix_weights: [1.0]
+
+  # triplet excitation
+  - id: 4
+    target: 12
+    W_pos: 5.2
+    W_neg: 0.0
+    bias: 2.0
+    condition:
+      6:
+        peaks: [1.1]
+        widths: [2.6]
+        mix_weights: [1.0]
+      7:
+        peaks: [1.1]
+        widths: [2.6]
+        mix_weights: [1.0]
+      8:
+        peaks: [1.1]
+        widths: [2.6]
+        mix_weights: [1.0]
+
+  # triplet inhibition
+  - id: 5
+    target: 12
+    W_pos: 0.0
+    W_neg: 5.2
+    bias: 2.0
+    condition:
+      9:
+        peaks: [1.1]
+        widths: [2.6]
+        mix_weights: [1.0]
+      10:
+        peaks: [1.1]
+        widths: [2.6]
+        mix_weights: [1.0]
+      11:
+        peaks: [1.1]
+        widths: [2.6]
+        mix_weights: [1.0]
+
+path:
+  output_path: /workspace/data/synthetic_data_strong_rules_single_target.pkl

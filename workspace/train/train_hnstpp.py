@@ -123,7 +123,7 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str,
                         default='./workspace/train/train_config.yaml')
     parser.add_argument('--data', type=str,
-                        default='./data/synthetic_data.pkl')
+                        default='./data/synthetic_suite_clean_full.pkl')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--run_name', type=str, default=None)
     args = parser.parse_args()

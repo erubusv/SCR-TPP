@@ -53,11 +53,12 @@ def print_best(manifest: dict):
             print(f"      args={' '.join(args)}")
 
 
-def resolve_dataset(manifest: dict, dataset: str) -> tuple[str, str]:
+def resolve_dataset(manifest: dict, dataset: str) -> tuple[str, str, int | None]:
     spec = manifest["datasets"].get(dataset)
     if spec is None:
         raise SystemExit(f"unknown dataset preset: {dataset}")
-    return str(spec["data"]), str(spec["config"])
+    fixed_target = spec.get("fixed_target")
+    return str(spec["data"]), str(spec["config"]), (None if fixed_target is None else int(fixed_target))
 
 
 def resolve_method(manifest: dict, method: str) -> dict:
@@ -74,17 +75,20 @@ def build_command(
     dataset: str | None,
     data: str | None,
     config: str | None,
-    fixed_target: int,
+    fixed_target: int | None,
     use_best_preset: bool,
     extra_args: list[str],
 ) -> list[str]:
     method_spec = resolve_method(manifest, method)
     if dataset is not None:
-        data_path, config_path = resolve_dataset(manifest, dataset)
+        data_path, config_path, dataset_fixed_target = resolve_dataset(manifest, dataset)
     else:
         if not data or not config:
             raise SystemExit("either --dataset or both --data/--config are required")
         data_path, config_path = data, config
+        dataset_fixed_target = None
+
+    resolved_fixed_target = int(dataset_fixed_target if fixed_target is None else fixed_target)
 
     cmd = [
         sys.executable,
@@ -94,7 +98,7 @@ def build_command(
         "--config",
         str(config_path),
         "--fixed_target",
-        str(int(fixed_target)),
+        str(int(resolved_fixed_target)),
     ]
     cmd.extend(str(x) for x in method_spec.get("default_args", []))
     if use_best_preset:
@@ -132,13 +136,13 @@ def main():
     ap_run.add_argument("--dataset", choices=sorted(manifest["datasets"].keys()))
     ap_run.add_argument("--data")
     ap_run.add_argument("--config")
-    ap_run.add_argument("--fixed_target", type=int, default=6)
+    ap_run.add_argument("--fixed_target", type=int)
     ap_run.add_argument("--use-best-preset", action="store_true")
     ap_run.add_argument("--extra-arg", action="append", default=[])
 
     ap_best = sub.add_parser("run-best")
     ap_best.add_argument("--dataset", required=True, choices=sorted(manifest["datasets"].keys()))
-    ap_best.add_argument("--fixed_target", type=int, default=6)
+    ap_best.add_argument("--fixed_target", type=int)
     ap_best.add_argument("--extra-arg", action="append", default=[])
 
     args = ap.parse_args()
@@ -161,7 +165,7 @@ def main():
             dataset=args.dataset,
             data=args.data,
             config=args.config,
-            fixed_target=int(args.fixed_target),
+            fixed_target=args.fixed_target,
             use_best_preset=bool(args.use_best_preset),
             extra_args=list(args.extra_arg),
         )
@@ -176,7 +180,7 @@ def main():
             dataset=str(args.dataset),
             data=None,
             config=None,
-            fixed_target=int(args.fixed_target),
+            fixed_target=args.fixed_target,
             use_best_preset=True,
             extra_args=list(args.extra_arg),
         )

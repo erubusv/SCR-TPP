@@ -87,7 +87,7 @@ def main():
     print(f"\nSplit: train={len(train_data)}, val={len(val_data)}, test={len(test_data)}")
     
     # Save
-    output_path = config.get('path', {}).get('output_path', './data/synthetic_data.pkl')
+    output_path = config.get('path', {}).get('output_path', './data/generated_synthetic.pkl')
     
     dataset = {
         'train': train_data,

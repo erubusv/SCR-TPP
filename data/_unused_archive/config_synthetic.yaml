@@ -1,0 +1,53 @@
+# Configuration for HNSTPP-Refactored Synthetic Data Generation (multiplicative inhibition)
+
+# Global Settings
+time_horizon: 500.0       
+num_event_types: 5      
+num_samples: 1000
+max_len: 512
+
+# Base Intensities (b_k)
+base_intensity:
+  0: 0.3  # High base rate (source)
+  1: 0.05  # Low base rate (target)
+  2: 0.1  # High base rate (source)
+  3: 0.02  # Low base rate
+  4: 0.3  # High base rate (inhibitor source)
+
+# Rules for multiplicative inhibition: λ(t) = (b + E) * exp(-I) + eps
+# W_pos: excitation weight (>0)
+# W_neg: inhibition weight (>0)
+rules:
+  # Rule 0: Simple Excitation 0 -> 1
+  - id: 0
+    target: 1
+    W_pos: 2.0
+    W_neg: 0.0
+    condition:
+      0:
+        peaks: [0.8]
+        widths: [1.8]
+        mix_weights: [1.0]
+
+  # Rule 1: Excitation 2 -> 3
+  - id: 1
+    target: 3
+    W_pos: 2.0
+    W_neg: 0.0
+    condition:
+      2:
+        peaks: [1.0]
+        widths: [2.2]
+        mix_weights: [1.0]
+
+  # Rule 2: Inhibition 4 -> 1 (Competing with Rule 0)
+  # Event 1 is excited by 0, inhibited by 4.
+  - id: 2
+    target: 1
+    W_pos: 0.0
+    W_neg: 2.0
+    condition:
+      4:
+        peaks: [0.6]
+        widths: [1.6]
+        mix_weights: [1.0]

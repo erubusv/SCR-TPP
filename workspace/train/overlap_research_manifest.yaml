@@ -6,66 +6,32 @@ evaluation_protocol:
     final report is top-k only.
 
 datasets:
-  triangle_fast:
-    data: /workspace/data/synthetic_custom_overlap_fast.pkl
-    config: /workspace/data/config_synthetic_custom_overlap.yaml
-    description: Reduced-sample overlap synthetic with the same true rules as triangle_full.
-  triangle_full:
-    data: /workspace/data/synthetic_custom_overlap.pkl
-    config: /workspace/data/config_synthetic_custom_overlap.yaml
-    description: Full overlap synthetic with triangular kernels.
-  gaussian_fast:
-    data: /workspace/data/synthetic_custom_overlap_gaussian_fast.pkl
-    config: /workspace/data/config_synthetic_custom_overlap_gaussian_fast.yaml
-    description: Reduced-sample overlap synthetic with truncated Gaussian kernels.
-  gaussian_full:
-    data: /workspace/data/synthetic_custom_overlap_gaussian.pkl
-    config: /workspace/data/config_synthetic_custom_overlap_gaussian.yaml
-    description: Full overlap synthetic with truncated Gaussian kernels.
-  exponential_fast:
-    data: /workspace/data/synthetic_custom_overlap_exponential_fast.pkl
-    config: /workspace/data/config_synthetic_custom_overlap_exponential_fast.yaml
-    description: Reduced-sample overlap synthetic with shifted truncated exponential kernels.
-  exponential_full:
-    data: /workspace/data/synthetic_custom_overlap_exponential.pkl
-    config: /workspace/data/config_synthetic_custom_overlap_exponential.yaml
-    description: Full overlap synthetic with shifted truncated exponential kernels.
   suite_clean_full:
     data: /workspace/data/synthetic_suite_clean_full.pkl
     config: /workspace/data/config_synthetic_suite_clean_full.yaml
+    fixed_target: 9
     description: Full clean disjoint benchmark with mixed order/sign and no shared-source overlap.
   suite_shared_conflict_full:
     data: /workspace/data/synthetic_suite_shared_conflict_full.pkl
     config: /workspace/data/config_synthetic_suite_shared_conflict_full.yaml
+    fixed_target: 6
     description: Full shared-source sign-conflict benchmark with cross-order overlap.
   suite_context_competition_full:
     data: /workspace/data/synthetic_suite_context_competition_full.pkl
     config: /workspace/data/config_synthetic_suite_context_competition_full.yaml
+    fixed_target: 7
     description: Full context-core competition benchmark with anchor-dependent triplets and nested gating.
 
 methods:
-  component_basis:
-    script: /workspace/workspace/train/ablate_component_basis.py
-    status: baseline
-    description: Component-basis prototype baseline.
-    default_args: []
   hnstpp_overlap:
     script: /workspace/workspace/train/ablate_custom_overlap.py
     status: baseline
     description: Original WH/HNSTPP overlap baseline.
     default_args: []
-  stagewise_cell:
-    script: /workspace/workspace/train/research_stagewise_cell_selectors.py
-    status: reference
-    description: Single-channel stagewise residual exact-cell selector kept as the main reference baseline.
-    default_args:
-      - "--source_kernel_mode=triangular_pwlin"
-      - "--source_kernel_num_bins=50"
-      - "--source_kernel_support_mult=3.0"
-  stagewise_multichannel_cell:
-    script: /workspace/workspace/train/research_stagewise_multichannel_cell_selectors.py
+  adaptive_multichannel_selector:
+    script: /workspace/workspace/train/adaptive_multichannel_selector.py
     status: retained_best
-    description: Adaptive multichannel stagewise selector with signed source-lag splitting and hierarchical ownership.
+    description: Self-contained adaptive multichannel stagewise selector with signed source-lag splitting and hierarchical ownership.
     default_args:
       - "--source_kernel_mode=triangular_pwlin"
       - "--source_kernel_num_bins=50"
@@ -77,19 +43,28 @@ methods:
       - "--split_thr=0.2"
 
 current_best:
-  method: stagewise_multichannel_cell
+  method: adaptive_multichannel_selector
   summary: >
     Best retained general-purpose exact top-k method so far. It keeps the
     stagewise ownership path, but adaptively splits only strong sign-conflict
-    sources into signed temporal channels. This is the main research path after
-    cross-dataset benchmarking on the full synthetic suite.
+    sources into signed temporal channels. The current implementation is kept in
+    one self-contained file as the main research path after cross-dataset
+    benchmarking on the full synthetic suite.
   observed:
+    suite_clean_full:
+      recall: "4/5"
+      notes: Current default source-pool setting misses source F on the clean benchmark; a dataset-specific larger source pool is needed to fully recover EF.
+      args:
+        - "--partition_mode=manual"
+        - "--manual_partition=0|1|2,3|4,5|6,7,8"
+        - "--thr_values=0.12"
+        - "--support_pow_values=1.25"
+        - "--sup_pen_values=0.5"
     suite_shared_conflict_full:
       recall: "6/7"
       notes: Improves over the single-channel reference by recovering the shared EF excitation pair.
       args:
         - "--partition_mode=manual"
-        - "--mode_values=parent"
         - "--manual_partition=0,1,4,5|2,3"
         - "--thr_values=0.25"
         - "--support_pow_values=1.75,3.0"
@@ -99,7 +74,6 @@ current_best:
       notes: Fully recovers the context-core competition benchmark.
       args:
         - "--partition_mode=manual"
-        - "--mode_values=parent"
         - "--manual_partition=0,1,2,3|4,5,6"
         - "--thr_values=0.12"
         - "--support_pow_values=1.0,1.25"

@@ -1,0 +1,128 @@
+# Strongly discriminative synthetic data with balanced rule families:
+# single / pair / triplet × excitation / inhibition
+
+time_horizon: 90.0
+num_event_types: 14
+num_samples: 1500
+max_len: 256
+
+# Sources (0~7): moderate base rates
+# Targets (8~13): low base rates to make rule effects stand out
+base_intensity:
+  0: 0.16
+  1: 0.16
+  2: 0.15
+  3: 0.15
+  4: 0.14
+  5: 0.14
+  6: 0.13
+  7: 0.13
+  8: 0.02
+  9: 0.02
+  10: 0.02
+  11: 0.02
+  12: 0.015
+  13: 0.015
+
+rules:
+  # -----------------------------
+  # single-source rules
+  # -----------------------------
+  - id: 0
+    target: 8
+    W_pos: 3.8
+    W_neg: 0.0
+    bias: 0.0
+    condition:
+      0:
+        peaks: [0.7]
+        widths: [1.8]
+        mix_weights: [1.0]
+
+  - id: 1
+    target: 9
+    W_pos: 0.0
+    W_neg: 3.6
+    bias: 0.0
+    condition:
+      1:
+        peaks: [0.7]
+        widths: [1.8]
+        mix_weights: [1.0]
+
+  # -----------------------------
+  # pair rules
+  # -----------------------------
+  - id: 2
+    target: 10
+    W_pos: 4.2
+    W_neg: 0.0
+    bias: 1.05
+    condition:
+      2:
+        peaks: [0.9]
+        widths: [2.2]
+        mix_weights: [1.0]
+      3:
+        peaks: [0.9]
+        widths: [2.2]
+        mix_weights: [1.0]
+
+  - id: 3
+    target: 11
+    W_pos: 0.0
+    W_neg: 4.2
+    bias: 1.05
+    condition:
+      4:
+        peaks: [0.9]
+        widths: [2.2]
+        mix_weights: [1.0]
+      5:
+        peaks: [0.9]
+        widths: [2.2]
+        mix_weights: [1.0]
+
+  # -----------------------------
+  # triplet rules
+  # -----------------------------
+  - id: 4
+    target: 12
+    W_pos: 5.0
+    W_neg: 0.0
+    bias: 2.0
+    condition:
+      0:
+        peaks: [1.1]
+        widths: [2.6]
+        mix_weights: [1.0]
+      2:
+        peaks: [1.1]
+        widths: [2.6]
+        mix_weights: [1.0]
+      6:
+        peaks: [1.1]
+        widths: [2.6]
+        mix_weights: [1.0]
+
+  - id: 5
+    target: 13
+    W_pos: 0.0
+    W_neg: 5.0
+    bias: 2.0
+    condition:
+      1:
+        peaks: [1.1]
+        widths: [2.6]
+        mix_weights: [1.0]
+      3:
+        peaks: [1.1]
+        widths: [2.6]
+        mix_weights: [1.0]
+      7:
+        peaks: [1.1]
+        widths: [2.6]
+        mix_weights: [1.0]
+
+path:
+  output_path: /workspace/data/synthetic_data_strong_rules.pkl
