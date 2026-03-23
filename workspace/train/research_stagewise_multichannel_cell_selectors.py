@@ -146,6 +146,7 @@ def main():
     ap.add_argument("--fixed_target", type=int, default=6)
     ap.add_argument("--partition_mode", choices=["manual", "singleton", "all_partitions"], default="all_partitions")
     ap.add_argument("--max_block", type=int, default=4)
+    ap.add_argument("--manual_partition", default=None)
     ap.add_argument("--mode_values", default="parent")
     ap.add_argument("--thr_values", default="0.12,0.2,0.25")
     ap.add_argument("--support_pow_values", default="1.0,1.25,1.75,3.0")
@@ -231,6 +232,7 @@ def main():
         args.partition_mode,
         source_ids,
         max_block=int(args.max_block),
+        manual_partition_text=args.manual_partition,
     )
     print(f"partition_mode={args.partition_mode} num_partitions={len(components_list)}")
     print("source_pool:", list(source_ids))

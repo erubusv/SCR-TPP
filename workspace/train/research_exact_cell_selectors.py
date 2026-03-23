@@ -23,6 +23,18 @@ def parse_csv_floats(text: str) -> list[float]:
     return [float(x.strip()) for x in text.split(",") if x.strip()]
 
 
+def parse_manual_partition(text: str) -> tuple[tuple[int, ...], ...]:
+    blocks = []
+    for raw_block in text.split("|"):
+        raw_block = raw_block.strip()
+        if not raw_block:
+            continue
+        block = tuple(sorted(int(x.strip()) for x in raw_block.split(",") if x.strip()))
+        if block:
+            blocks.append(block)
+    return tuple(sorted(blocks))
+
+
 def node_label(node: int, fixed_target: int) -> str:
     if int(node) == int(fixed_target):
         return "T"
@@ -118,8 +130,11 @@ def build_partitions(
     source_ids: tuple[int, ...],
     *,
     max_block: int,
+    manual_partition_text: str | None = None,
 ) -> list[tuple[tuple[int, ...], ...]]:
     if mode == "manual":
+        if manual_partition_text:
+            return [parse_manual_partition(manual_partition_text)]
         return [((0, 1, 4, 5), (2, 3))]
     if mode == "singleton":
         return [tuple((s,) for s in source_ids)]
@@ -135,6 +150,7 @@ def main():
     ap.add_argument("--fixed_target", type=int, default=6)
     ap.add_argument("--partition_mode", choices=["manual", "singleton", "all_partitions"], default="manual")
     ap.add_argument("--max_block", type=int, default=4)
+    ap.add_argument("--manual_partition", default=None)
     ap.add_argument("--topn", type=int, default=80)
     ap.add_argument("--thr_values", default="0.02,0.05,0.1,0.15,0.2,0.25,0.3,0.4,0.5")
     ap.add_argument("--support_pow_values", default="0.0,0.25,0.5,0.75,1.0")
@@ -173,6 +189,7 @@ def main():
         args.partition_mode,
         tuple(sorted(source_ids)),
         max_block=int(args.max_block),
+        manual_partition_text=args.manual_partition,
     )
     print(f"partition_mode={args.partition_mode} num_partitions={len(components_list)}")
     thr_values = parse_csv_floats(args.thr_values)

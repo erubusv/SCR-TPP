@@ -28,6 +28,7 @@ def main():
     print(f"Time horizon: {config.get('time_horizon', 100.0)}")
     print(f"Num event types: {config.get('num_event_types', 4)}")
     print(f"Num rules: {len(config.get('rules', []))}")
+    print(f"Seed: {config.get('seed', None)}")
     print()
     
     # Create rules
@@ -46,7 +47,8 @@ def main():
         num_samples=config.get('num_samples', 5000),
         time_horizon=config.get('time_horizon', 100.0),
         base_intensities=config.get('base_intensity', {0: 0.1}),
-        max_len=config.get('max_len', 512)
+        max_len=config.get('max_len', 512),
+        seed=config.get('seed'),
     )
     
     print(f"Generated {len(data)} sequences")

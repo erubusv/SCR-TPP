@@ -30,6 +30,18 @@ datasets:
     data: /workspace/data/synthetic_custom_overlap_exponential.pkl
     config: /workspace/data/config_synthetic_custom_overlap_exponential.yaml
     description: Full overlap synthetic with shifted truncated exponential kernels.
+  suite_clean_full:
+    data: /workspace/data/synthetic_suite_clean_full.pkl
+    config: /workspace/data/config_synthetic_suite_clean_full.yaml
+    description: Full clean disjoint benchmark with mixed order/sign and no shared-source overlap.
+  suite_shared_conflict_full:
+    data: /workspace/data/synthetic_suite_shared_conflict_full.pkl
+    config: /workspace/data/config_synthetic_suite_shared_conflict_full.yaml
+    description: Full shared-source sign-conflict benchmark with cross-order overlap.
+  suite_context_competition_full:
+    data: /workspace/data/synthetic_suite_context_competition_full.pkl
+    config: /workspace/data/config_synthetic_suite_context_competition_full.yaml
+    description: Full context-core competition benchmark with anchor-dependent triplets and nested gating.
 
 methods:
   component_basis:

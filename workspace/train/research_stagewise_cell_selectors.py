@@ -85,6 +85,7 @@ def main():
     ap.add_argument("--fixed_target", type=int, default=6)
     ap.add_argument("--partition_mode", choices=["manual", "singleton", "all_partitions"], default="all_partitions")
     ap.add_argument("--max_block", type=int, default=4)
+    ap.add_argument("--manual_partition", default=None)
     ap.add_argument("--mode_values", default="mobius,parent,orderwise,orderwise_alt")
     ap.add_argument("--thr_values", default="0.05,0.15")
     ap.add_argument("--support_pow_values", default="1.0")
@@ -104,6 +105,7 @@ def main():
     )
     ap.add_argument("--source_kernel_num_bins", type=int, default=50)
     ap.add_argument("--source_kernel_support_mult", type=float, default=3.0)
+    ap.add_argument("--source_pool_topk", type=int, default=8)
     ap.add_argument("--topn", type=int, default=40)
     args = ap.parse_args()
 
@@ -120,7 +122,7 @@ def main():
         int(args.fixed_target),
         delta_t=0.1,
         max_lag=10.0,
-        source_pool_topk=8,
+        source_pool_topk=int(args.source_pool_topk),
     )
     phase2 = phase2_source_evidence(
         tr_data,
@@ -143,6 +145,7 @@ def main():
         args.partition_mode,
         tuple(sorted(source_ids)),
         max_block=int(args.max_block),
+        manual_partition_text=args.manual_partition,
     )
     print(f"partition_mode={args.partition_mode} num_partitions={len(components_list)}")
 

@@ -158,7 +158,7 @@ class Rule:
         return max(0.0, kernel_sum - self.bias)
 
 
-def generate_multiplicative_data(rules, num_samples, time_horizon, base_intensities, max_len=1024, eps=1e-8):
+def generate_multiplicative_data(rules, num_samples, time_horizon, base_intensities, max_len=1024, eps=1e-8, seed=None):
     """Generate synthetic event sequences with Ogata thinning."""
     data = []
 
@@ -174,7 +174,7 @@ def generate_multiplicative_data(rules, num_samples, time_horizon, base_intensit
     event_history = np.zeros((num_types, max_len), dtype=np.float64)
     lambda_k_array = np.zeros(num_types, dtype=np.float64)
 
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(seed)
 
     for _ in tqdm(range(num_samples), leave=False):
         t_curr = 0.0
@@ -323,6 +323,7 @@ def generate_synthetic_exp(config):
         config['time_horizon'],
         config['base_intensity'],
         max_len=config.get('max_len', 1024),
+        seed=config.get('seed'),
     )
 
 
