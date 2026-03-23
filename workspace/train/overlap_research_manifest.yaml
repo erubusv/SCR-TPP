@@ -54,65 +54,53 @@ methods:
     status: baseline
     description: Original WH/HNSTPP overlap baseline.
     default_args: []
-  exact_cell:
-    script: /workspace/workspace/train/research_exact_cell_selectors.py
-    status: research
-    description: Exact-cell selector with flat top-k ranking.
-    default_args: []
-  hierarchical_cell:
-    script: /workspace/workspace/train/research_hier_cell_selectors.py
-    status: research
-    description: Hierarchical exact-cell selector with mode mixing.
-    default_args: []
   stagewise_cell:
     script: /workspace/workspace/train/research_stagewise_cell_selectors.py
-    status: retained_best
-    description: Stagewise residual exact-cell selector with hierarchical ownership and piecewise-linear source-kernel approximation.
+    status: reference
+    description: Single-channel stagewise residual exact-cell selector kept as the main reference baseline.
     default_args:
       - "--source_kernel_mode=triangular_pwlin"
       - "--source_kernel_num_bins=50"
       - "--source_kernel_support_mult=3.0"
-  stagewise_rate:
-    script: /workspace/workspace/train/research_stagewise_rate_selectors.py
-    status: research
-    description: Stagewise selector using continuous-time cell-rate statistics.
-    default_args: []
   stagewise_multichannel_cell:
     script: /workspace/workspace/train/research_stagewise_multichannel_cell_selectors.py
-    status: research
-    description: Stagewise exact-cell selector with signed multichannel source evidence.
+    status: retained_best
+    description: Adaptive multichannel stagewise selector with signed source-lag splitting and hierarchical ownership.
     default_args:
       - "--source_kernel_mode=triangular_pwlin"
       - "--source_kernel_num_bins=50"
       - "--source_kernel_support_mult=3.0"
-  channel_rate:
-    script: /workspace/workspace/train/research_channel_rate_selectors.py
-    status: research
-    description: Signed temporal-channel selector with continuous-time rate contrasts.
-    default_args: []
+      - "--adaptive_split"
+      - "--conflict_balance_min=0.25"
+      - "--conflict_sep_min=1.5"
+      - "--conflict_gain_min=0.05"
+      - "--split_thr=0.2"
 
 current_best:
-  method: stagewise_cell
+  method: stagewise_multichannel_cell
   summary: >
-    Best retained exact top-k method so far. The default research path now uses
-    a piecewise-linear source-kernel approximation. Observed best results are
-    7/7 on triangle_fast and 6/7 on triangle_full.
+    Best retained general-purpose exact top-k method so far. It keeps the
+    stagewise ownership path, but adaptively splits only strong sign-conflict
+    sources into signed temporal channels. This is the main research path after
+    cross-dataset benchmarking on the full synthetic suite.
   observed:
-    triangle_fast:
-      recall: "7/7"
-      notes: Best retained fast result.
-      args:
-        - "--partition_mode=manual"
-        - "--mode_values=parent"
-        - "--thr_values=0.12,0.2"
-        - "--support_pow_values=1.0,1.25"
-        - "--sup_pen_values=1.5,2.0"
-    triangle_full:
+    suite_shared_conflict_full:
       recall: "6/7"
-      notes: Best retained full result.
+      notes: Improves over the single-channel reference by recovering the shared EF excitation pair.
       args:
         - "--partition_mode=manual"
         - "--mode_values=parent"
+        - "--manual_partition=0,1,4,5|2,3"
         - "--thr_values=0.25"
         - "--support_pow_values=1.75,3.0"
         - "--sup_pen_values=2.5,10.0"
+    suite_context_competition_full:
+      recall: "7/7"
+      notes: Fully recovers the context-core competition benchmark.
+      args:
+        - "--partition_mode=manual"
+        - "--mode_values=parent"
+        - "--manual_partition=0,1,2,3|4,5,6"
+        - "--thr_values=0.12"
+        - "--support_pow_values=1.0,1.25"
+        - "--sup_pen_values=0.5"
