@@ -1139,6 +1139,188 @@ def project_component_selection(
     return best_items
 
 
+def subset_shadow_prune_component_selection(
+    *,
+    total_tr: np.ndarray,
+    pos_tr: np.ndarray,
+    total_va: np.ndarray,
+    pos_va: np.ndarray,
+    selected_items: list[dict],
+    sibling_lambda: float,
+    projection_lambda: float,
+    tau: float,
+) -> list[dict]:
+    if len(selected_items) <= 1 or float(tau) <= 0.0:
+        return list(selected_items)
+
+    scale = float(math.log(max(float(total_va.sum()), 2.0)))
+
+    def objective(items: list[dict]) -> float:
+        feats = [it["signed_feat"] for it in items]
+        rules = [(it["srcs"], it["sign"], it["tgt"]) for it in items]
+        obj = fit_bic_from_signed_feats(total_tr, pos_tr, total_va, pos_va, feats)
+        obj += float(sibling_lambda) * scale * float(sibling_union_penalty(rules))
+        obj += float(projection_lambda) * scale * float(redundancy_pair_penalty(rules))
+        return float(obj)
+
+    cur = list(selected_items)
+    cur_obj = objective(cur)
+    stop = float(tau) * 0.5 * scale
+
+    while len(cur) > 1:
+        best_idx = None
+        best_delta = None
+        for idx, item in enumerate(cur):
+            srcs = set(int(s) for s in item["srcs"])
+            has_same_sign_superset = any(
+                j != idx
+                and other["sign"] == item["sign"]
+                and int(other["tgt"]) == int(item["tgt"])
+                and srcs < set(int(s) for s in other["srcs"])
+                for j, other in enumerate(cur)
+            )
+            if not has_same_sign_superset:
+                continue
+            rem = cur[:idx] + cur[idx + 1 :]
+            rem_obj = objective(rem)
+            delta = float(rem_obj - cur_obj)
+            if best_delta is None or delta < best_delta:
+                best_delta = delta
+                best_idx = idx
+        if best_idx is None or float(best_delta) > stop:
+            break
+        cur.pop(int(best_idx))
+        cur_obj = objective(cur)
+
+    return cur
+
+
+def source_level_project_component_selection(
+    *,
+    total_tr: np.ndarray,
+    pos_tr: np.ndarray,
+    total_va: np.ndarray,
+    pos_va: np.ndarray,
+    source_order: tuple[int, ...],
+    selected_items: list[dict],
+    sibling_lambda: float,
+    projection_lambda: float,
+) -> list[dict]:
+    if len(selected_items) <= 1:
+        return list(selected_items)
+
+    scale = float(math.log(max(float(total_va.sum()), 2.0)))
+    src_pos = {int(s): i for i, s in enumerate(source_order)}
+    raw_feats = []
+    valid_items = []
+    for item in selected_items:
+        try:
+            local_idxs = tuple(sorted(int(src_pos[int(s)]) for s in item["srcs"]))
+        except KeyError:
+            continue
+        raw_feat = cell_feature_from_local_idxs(len(source_order), local_idxs)
+        raw_feats.append(raw_feat)
+        valid_items.append(item)
+    n = len(valid_items)
+    if n <= 1:
+        return list(valid_items)
+
+    feats = []
+    for i, item in enumerate(valid_items):
+        mask = np.ones_like(raw_feats[i], dtype=bool)
+        set_r = set(int(s) for s in item["srcs"])
+        for j, other in enumerate(valid_items):
+            if i == j:
+                continue
+            if other["sign"] != item["sign"] or int(other["tgt"]) != int(item["tgt"]):
+                continue
+            if set_r < set(int(s) for s in other["srcs"]):
+                mask &= ~(raw_feats[j] > 0)
+        sign_mult = 1.0 if str(item["sign"]) == "exc" else -1.0
+        feats.append(sign_mult * raw_feats[i] * mask.astype(np.float64))
+
+    best_obj = math.inf
+    best_items = list(valid_items)
+    for mask in range(1 << n):
+        cur_feats = []
+        cur_items = []
+        rules = []
+        for i, item in enumerate(valid_items):
+            if (mask >> i) & 1:
+                cur_feats.append(feats[i])
+                cur_items.append(item)
+                rules.append((item["srcs"], item["sign"], item["tgt"]))
+        obj = fit_bic_from_signed_feats(total_tr, pos_tr, total_va, pos_va, cur_feats)
+        obj += float(sibling_lambda) * scale * float(sibling_union_penalty(rules))
+        obj += float(projection_lambda) * scale * float(redundancy_pair_penalty(rules))
+        if obj < best_obj:
+            best_obj = float(obj)
+            best_items = list(cur_items)
+    return best_items
+
+
+def subset_sign_consistency_prune(
+    *,
+    total: np.ndarray,
+    pos: np.ndarray,
+    source_order: tuple[int, ...],
+    selected_items: list[dict],
+) -> list[dict]:
+    if len(selected_items) <= 1:
+        return list(selected_items)
+
+    all_bits = np.arange(len(total), dtype=np.int64)
+    src_pos = {int(s): i for i, s in enumerate(source_order)}
+    global_rate = float((float(pos.sum()) + 0.5) / (float(total.sum()) + 1.0))
+    global_logit = math.log(global_rate / max(1.0 - global_rate, 1e-8))
+
+    cur = list(selected_items)
+    changed = True
+    while changed and len(cur) > 1:
+        changed = False
+        keep = []
+        for item in cur:
+            try:
+                local_idxs = tuple(sorted(int(src_pos[int(s)]) for s in item["srcs"]))
+            except KeyError:
+                keep.append(item)
+                continue
+            bits_u = subset_bits(local_idxs)
+            mask = (all_bits & bits_u) == bits_u
+            has_superset = False
+            for other in cur:
+                if other is item:
+                    continue
+                if other["sign"] != item["sign"] or int(other["tgt"]) != int(item["tgt"]):
+                    continue
+                set_r = set(int(s) for s in item["srcs"])
+                set_o = set(int(s) for s in other["srcs"])
+                if set_r < set_o and len(set_o) == len(set_r) + 1:
+                    has_superset = True
+                    local_other = tuple(sorted(int(src_pos[int(s)]) for s in other["srcs"]))
+                    bits_o = subset_bits(local_other)
+                    mask &= ~((all_bits & bits_o) == bits_o)
+            if not has_superset:
+                keep.append(item)
+                continue
+            tot = float(total[mask].sum())
+            if tot <= 0.0:
+                changed = True
+                continue
+            p = float(pos[mask].sum())
+            rate = float((p + 0.5) / (tot + 1.0))
+            logit = math.log(rate / max(1.0 - rate, 1e-8))
+            if item["sign"] == "exc" and logit <= global_logit:
+                changed = True
+                continue
+            if item["sign"] == "inh" and logit >= global_logit:
+                changed = True
+                continue
+            keep.append(item)
+        cur = keep
+    return cur
+
+
 def prune_component_selection(
     *,
     total_tr: np.ndarray,
@@ -1354,6 +1536,9 @@ def run_auto_sibling_bic(
     fixed_target: int,
     sibling_lambda: float,
     projection_lambda: float,
+    subset_prune_tau: float,
+    source_projection_lambda: float,
+    sign_prune: bool,
     post_prune_mode: str,
     post_prune_tau: float,
 ):
@@ -1410,6 +1595,80 @@ def run_auto_sibling_bic(
             sibling_lambda=float(sibling_lambda),
             projection_lambda=float(projection_lambda),
         )
+        best_items = subset_shadow_prune_component_selection(
+            total_tr=tr_total,
+            pos_tr=tr_pos,
+            total_va=va_total,
+            pos_va=va_pos,
+            selected_items=best_items,
+            sibling_lambda=float(sibling_lambda),
+            projection_lambda=float(projection_lambda),
+            tau=float(subset_prune_tau),
+        )
+        if float(source_projection_lambda) > 0.0 and len(best_items) > 1:
+            source_cols = []
+            for src in comp["sources"]:
+                cols = [
+                    int(i)
+                    for i, ch_id in enumerate(comp["channel_ids"])
+                    if int(channel_by_id[int(ch_id)].source) == int(src)
+                ]
+                source_cols.append(cols)
+            xtr_source = np.stack(
+                [
+                    X_train[:, global_cols][:, cols].max(axis=1).astype(np.int64)
+                    if len(cols) > 1
+                    else X_train[:, global_cols][:, cols[0]].astype(np.int64)
+                    for cols in source_cols
+                ],
+                axis=1,
+            )
+            xva_source = np.stack(
+                [
+                    X_val[:, global_cols][:, cols].max(axis=1).astype(np.int64)
+                    if len(cols) > 1
+                    else X_val[:, global_cols][:, cols[0]].astype(np.int64)
+                    for cols in source_cols
+                ],
+                axis=1,
+            )
+            src_total_tr, src_pos_tr = component_cell_counts(xtr_source, y_train)
+            src_total_va, src_pos_va = component_cell_counts(xva_source, y_val)
+            best_items = source_level_project_component_selection(
+                total_tr=src_total_tr,
+                pos_tr=src_pos_tr,
+                total_va=src_total_va,
+                pos_va=src_pos_va,
+                source_order=tuple(int(s) for s in comp["sources"]),
+                selected_items=best_items,
+                sibling_lambda=float(sibling_lambda),
+                projection_lambda=float(source_projection_lambda),
+            )
+        if bool(sign_prune) and len(best_items) > 1:
+            source_cols = []
+            for src in comp["sources"]:
+                cols = [
+                    int(i)
+                    for i, ch_id in enumerate(comp["channel_ids"])
+                    if int(channel_by_id[int(ch_id)].source) == int(src)
+                ]
+                source_cols.append(cols)
+            xall_source = np.stack(
+                [
+                    X_train[:, global_cols][:, cols].max(axis=1).astype(np.int64)
+                    if len(cols) > 1
+                    else X_train[:, global_cols][:, cols[0]].astype(np.int64)
+                    for cols in source_cols
+                ],
+                axis=1,
+            )
+            src_total_all, src_pos_all = component_cell_counts(xall_source, y_train)
+            best_items = subset_sign_consistency_prune(
+                total=src_total_all,
+                pos=src_pos_all,
+                source_order=tuple(int(s) for s in comp["sources"]),
+                selected_items=best_items,
+            )
         preds.update((it["srcs"], it["sign"], it["tgt"]) for it in best_items)
     return tuple(sorted(preds))
 
@@ -1456,6 +1715,9 @@ def main():
     ap.add_argument("--max_auto_rules", type=int, default=20)
     ap.add_argument("--auto_sibling_lambda", type=float, default=4.0)
     ap.add_argument("--auto_projection_lambda", type=float, default=0.0)
+    ap.add_argument("--auto_subset_prune_tau", type=float, default=0.0)
+    ap.add_argument("--auto_source_projection_lambda", type=float, default=0.0)
+    ap.add_argument("--auto_sign_prune", action="store_true")
     ap.add_argument("--auto_post_prune_mode", choices=["none", "bic", "struct"], default="none")
     ap.add_argument("--auto_post_prune_tau", type=float, default=1.0)
     ap.add_argument("--topn", type=int, default=40)
@@ -1652,6 +1914,9 @@ def main():
                 fixed_target=int(args.fixed_target),
                 sibling_lambda=float(args.auto_sibling_lambda),
                 projection_lambda=float(args.auto_projection_lambda),
+                subset_prune_tau=float(args.auto_subset_prune_tau),
+                source_projection_lambda=float(args.auto_source_projection_lambda),
+                sign_prune=bool(args.auto_sign_prune),
                 post_prune_mode=str(args.auto_post_prune_mode),
                 post_prune_tau=float(args.auto_post_prune_tau),
             )
