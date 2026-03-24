@@ -873,6 +873,377 @@ def select_stage(
     return dedup
 
 
+def component_cell_counts(X: np.ndarray, y: np.ndarray):
+    d = X.shape[1]
+    if len(y) == 0:
+        return np.zeros((1 << d,), dtype=np.float64), np.zeros((1 << d,), dtype=np.float64)
+    bits = np.zeros((len(y),), dtype=np.int64)
+    for j in range(d):
+        bits |= (X[:, j].astype(np.int64) << j)
+    total = np.bincount(bits, minlength=(1 << d)).astype(np.float64)
+    pos = np.bincount(bits, weights=y.astype(np.float64), minlength=(1 << d)).astype(np.float64)
+    return total, pos
+
+
+def cell_feature_from_local_idxs(d: int, local_idxs: tuple[int, ...]) -> np.ndarray:
+    bits_u = subset_bits(local_idxs)
+    all_bits = np.arange(1 << d, dtype=np.int64)
+    return ((all_bits & bits_u) == bits_u).astype(np.float64)
+
+
+def conditional_unique_ratio(
+    feat: np.ndarray,
+    neighbor_feats: list[np.ndarray],
+    weights: np.ndarray,
+) -> float:
+    denom = float(np.dot(weights, feat * feat))
+    if denom <= 1e-12 or not neighbor_feats:
+        return 1.0
+    Z = np.stack(neighbor_feats, axis=1).astype(np.float64)
+    ws = np.sqrt(np.maximum(weights, 0.0))
+    A = Z * ws[:, None]
+    b = feat * ws
+    try:
+        coef, *_ = np.linalg.lstsq(A, b, rcond=None)
+        resid = b - A @ coef
+    except np.linalg.LinAlgError:
+        return 1.0
+    num = float(np.dot(resid, resid))
+    return float(np.clip(num / max(denom, 1e-12), 0.0, 1.0))
+
+
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    out = np.empty_like(x, dtype=np.float64)
+    pos = x >= 0.0
+    out[pos] = 1.0 / (1.0 + np.exp(-x[pos]))
+    ex = np.exp(x[~pos])
+    out[~pos] = ex / (1.0 + ex)
+    return out
+
+
+def binomial_loglik(total: np.ndarray, pos: np.ndarray, eta: np.ndarray) -> float:
+    return float(np.sum(pos * eta - total * np.logaddexp(0.0, eta)))
+
+
+def fit_signed_binomial_model(
+    total: np.ndarray,
+    pos: np.ndarray,
+    signed_feats: list[np.ndarray],
+    *,
+    beta_init: float | None = None,
+    theta_init: np.ndarray | None = None,
+    num_iter: int = 40,
+) -> tuple[float, np.ndarray, np.ndarray]:
+    mean_rate = float((pos.sum() + 0.5) / max(total.sum() + 1.0, 1.0))
+    beta = float(logit(mean_rate)) if beta_init is None else float(beta_init)
+    p = len(signed_feats)
+    theta = np.zeros((p,), dtype=np.float64) if theta_init is None else np.maximum(np.asarray(theta_init, dtype=np.float64), 0.0)
+    if p == 0:
+        eta = np.full_like(total, beta, dtype=np.float64)
+        return beta, theta, eta
+    G = np.stack(signed_feats, axis=1).astype(np.float64)
+    for _ in range(max(int(num_iter), 1)):
+        eta = beta + G @ theta
+        prob = _sigmoid(eta)
+        resid = pos - total * prob
+        weight = total * prob * (1.0 - prob)
+        h0 = float(weight.sum()) + 1e-8
+        step0 = float(np.clip(resid.sum() / h0, -1.0, 1.0))
+        beta += step0
+        max_change = abs(step0)
+        for j in range(p):
+            eta = beta + G @ theta
+            prob = _sigmoid(eta)
+            resid = pos - total * prob
+            weight = total * prob * (1.0 - prob)
+            gj = G[:, j]
+            uj = float(np.dot(resid, gj))
+            hj = float(np.dot(weight, gj * gj)) + 1e-8
+            new_theta = max(0.0, float(theta[j] + np.clip(uj / hj, -1.0, 1.0)))
+            max_change = max(max_change, abs(new_theta - float(theta[j])))
+            theta[j] = new_theta
+        if max_change < 1e-5:
+            break
+    eta = beta + G @ theta
+    return beta, theta, eta
+
+
+def fit_bic_from_signed_feats(
+    total_tr: np.ndarray,
+    pos_tr: np.ndarray,
+    total_va: np.ndarray,
+    pos_va: np.ndarray,
+    signed_feats: list[np.ndarray],
+) -> float:
+    beta, theta, _ = fit_signed_binomial_model(total_tr, pos_tr, signed_feats)
+    if signed_feats:
+        Gv = np.stack(signed_feats, axis=1).astype(np.float64)
+        eta_val = float(beta) + Gv @ theta
+    else:
+        eta_val = np.full_like(total_va, float(beta), dtype=np.float64)
+    ll_val = binomial_loglik(total_va, pos_va, eta_val)
+    k = int(len(signed_feats)) + 1
+    return float(-2.0 * ll_val + float(k) * math.log(max(float(total_va.sum()), 2.0)))
+
+
+def approx_val_gain_from_score(
+    eta_val: np.ndarray,
+    total_val: np.ndarray,
+    pos_val: np.ndarray,
+    signed_feat_val: np.ndarray,
+) -> float:
+    prob = _sigmoid(eta_val)
+    resid = pos_val - total_val * prob
+    weight = total_val * prob * (1.0 - prob)
+    u = float(np.dot(resid, signed_feat_val))
+    if u <= 0.0:
+        return 0.0
+    h = float(np.dot(weight, signed_feat_val * signed_feat_val)) + 1e-8
+    return float(0.5 * (u * u) / h)
+
+
+def sibling_union_penalty(
+    rules: list[tuple[tuple[int, ...], str, int]],
+) -> int:
+    by_sign: dict[tuple[str, int], set[tuple[int, ...]]] = {}
+    for srcs, sign, tgt in rules:
+        by_sign.setdefault((str(sign), int(tgt)), set()).add(tuple(int(s) for s in srcs))
+    pen = 0
+    for subsets in by_sign.values():
+        tuples = list(subsets)
+        for a, b in itertools.combinations(tuples, 2):
+            set_a = set(int(s) for s in a)
+            set_b = set(int(s) for s in b)
+            union = tuple(sorted(set_a | set_b))
+            if len(union) <= max(len(a), len(b)) or len(union) > 3:
+                continue
+            # Penalize sibling parents that imply a union rule but leave it absent.
+            if len(a) == len(b) == len(union) - 1 and tuple(union) not in subsets:
+                pen += 1
+    return int(pen)
+
+
+def run_auto_conditional_redundancy(
+    *,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    component_defs: list[dict],
+    base_tables: dict,
+    channel_by_id: dict[int, ChannelDef],
+    support_pow: float,
+    sup_pen: float,
+    fixed_target: int,
+    max_rules: int,
+):
+    def _refit_component(
+        total_tr: np.ndarray,
+        pos_tr: np.ndarray,
+        total_va: np.ndarray,
+        pos_va: np.ndarray,
+        items: list[dict],
+    ):
+        feats = [it["signed_feat"] for it in items]
+        beta, theta, _ = fit_signed_binomial_model(
+            total_tr,
+            pos_tr,
+            feats,
+        )
+        if feats:
+            Gv = np.stack(feats, axis=1)
+            eta_val = float(beta) + Gv @ theta
+        else:
+            eta_val = np.full_like(total_va, float(beta), dtype=np.float64)
+        ll_val = binomial_loglik(total_va, pos_va, eta_val)
+        return float(beta), theta, eta_val, float(ll_val)
+
+    comp_models = []
+    for comp_id, comp in enumerate(component_defs):
+        global_cols = [int(c) for c in comp["global_cols"]]
+        if global_cols:
+            tr_total, tr_pos = component_cell_counts(X_train[:, global_cols], y_train)
+            va_total, va_pos = component_cell_counts(X_val[:, global_cols], y_val)
+        else:
+            tr_total = np.zeros((1,), dtype=np.float64)
+            tr_pos = np.zeros((1,), dtype=np.float64)
+            va_total = np.zeros((1,), dtype=np.float64)
+            va_pos = np.zeros((1,), dtype=np.float64)
+        beta, theta, eta_val, ll_val = _refit_component(tr_total, tr_pos, va_total, va_pos, [])
+        comp_models.append(
+            {
+                "train_total": tr_total,
+                "train_pos": tr_pos,
+                "val_total": va_total,
+                "val_pos": va_pos,
+                "selected": [],
+                "beta": beta,
+                "theta": theta,
+                "eta_val": eta_val,
+                "ll_val": ll_val,
+            }
+        )
+
+    group_pool: dict[tuple[int, tuple[int, ...]], list[dict]] = {}
+    for order in (1, 2, 3):
+        rows = select_stage(
+            base_tables,
+            component_defs,
+            channel_by_id,
+            order=order,
+            support_pow=float(support_pow),
+            sup_pen=float(sup_pen),
+            fixed_target=int(fixed_target),
+        )
+        for adj_score, coef, comp_id, srcs, sign, tgt, combo in rows:
+            d = len(component_defs[int(comp_id)]["channel_ids"])
+            local_idxs = tuple(int(component_defs[int(comp_id)]["channel_pos"][int(ch)]) for ch in combo)
+            raw_feat = cell_feature_from_local_idxs(d, local_idxs)
+            sign_mult = 1.0 if str(sign) == "exc" else -1.0
+            item = {
+                "comp_id": int(comp_id),
+                "srcs": tuple(int(s) for s in srcs),
+                "sign": str(sign),
+                "tgt": int(tgt),
+                "raw_feat": raw_feat,
+                "signed_feat": sign_mult * raw_feat,
+            }
+            group_pool.setdefault((int(comp_id), tuple(int(s) for s in srcs)), []).append(item)
+
+    selected_group_keys: set[tuple[int, tuple[int, ...]]] = set()
+    selected_rules: list[tuple[tuple[int, ...], str, int]] = []
+    for _ in range(max(int(max_rules), 1)):
+        best = None
+        for group_key, variants in group_pool.items():
+            if group_key in selected_group_keys:
+                continue
+            comp_id = int(group_key[0])
+            comp_model = comp_models[comp_id]
+            for var in variants:
+                set_srcs = set(int(s) for s in var["srcs"])
+                neighbor_feats = []
+                for sel in comp_model["selected"]:
+                    set_sel = set(int(s) for s in sel["srcs"])
+                    if set_srcs < set_sel or set_sel < set_srcs:
+                        neighbor_feats.append(sel["raw_feat"])
+                uniq = conditional_unique_ratio(var["raw_feat"], neighbor_feats, comp_model["train_total"])
+                if uniq <= 1e-8:
+                    continue
+                gain = approx_val_gain_from_score(
+                    comp_model["eta_val"],
+                    comp_model["val_total"],
+                    comp_model["val_pos"],
+                    var["signed_feat"],
+                )
+                eff_gain = float(gain * uniq)
+                bic_stop = 0.5 * math.log(max(float(comp_model["val_total"].sum()), 2.0))
+                cand = {
+                    "eff_gain": eff_gain,
+                    "bic_stop": float(bic_stop),
+                    "comp_id": comp_id,
+                    "group_key": group_key,
+                    "var": var,
+                }
+                if best is None or float(cand["eff_gain"]) > float(best["eff_gain"]):
+                    best = cand
+        if best is None:
+            break
+        if float(best["eff_gain"]) <= float(best["bic_stop"]):
+            break
+        comp_id = int(best["comp_id"])
+        comp_model = comp_models[comp_id]
+        new_items = list(comp_model["selected"]) + [best["var"]]
+        beta, theta, eta_val, ll_val = _refit_component(
+            comp_model["train_total"],
+            comp_model["train_pos"],
+            comp_model["val_total"],
+            comp_model["val_pos"],
+            new_items,
+        )
+        comp_model["selected"] = new_items
+        comp_model["beta"] = beta
+        comp_model["theta"] = theta
+        comp_model["eta_val"] = eta_val
+        comp_model["ll_val"] = ll_val
+        selected_group_keys.add(tuple(best["group_key"]))
+        selected_rules.append((best["var"]["srcs"], best["var"]["sign"], best["var"]["tgt"]))
+
+    return tuple(sorted(set(selected_rules)))
+
+
+def run_auto_sibling_bic(
+    *,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    component_defs: list[dict],
+    base_tables: dict,
+    channel_by_id: dict[int, ChannelDef],
+    support_pow: float,
+    sup_pen: float,
+    fixed_target: int,
+    sibling_lambda: float,
+):
+    group_pool: dict[tuple[int, tuple[int, ...]], list[dict]] = {}
+    for order in (1, 2, 3):
+        rows = select_stage(
+            base_tables,
+            component_defs,
+            channel_by_id,
+            order=order,
+            support_pow=float(support_pow),
+            sup_pen=float(sup_pen),
+            fixed_target=int(fixed_target),
+        )
+        for adj_score, coef, comp_id, srcs, sign, tgt, combo in rows:
+            d = len(component_defs[int(comp_id)]["channel_ids"])
+            local_idxs = tuple(int(component_defs[int(comp_id)]["channel_pos"][int(ch)]) for ch in combo)
+            raw_feat = cell_feature_from_local_idxs(d, local_idxs)
+            sign_mult = 1.0 if str(sign) == "exc" else -1.0
+            item = {
+                "comp_id": int(comp_id),
+                "srcs": tuple(int(s) for s in srcs),
+                "sign": str(sign),
+                "tgt": int(tgt),
+                "adj_score": float(adj_score),
+                "signed_feat": sign_mult * raw_feat,
+            }
+            group_pool.setdefault((int(comp_id), tuple(int(s) for s in srcs)), []).append(item)
+
+    preds: set[tuple[tuple[int, ...], str, int]] = set()
+    for comp_id, comp in enumerate(component_defs):
+        global_cols = [int(c) for c in comp["global_cols"]]
+        tr_total, tr_pos = component_cell_counts(X_train[:, global_cols], y_train)
+        va_total, va_pos = component_cell_counts(X_val[:, global_cols], y_val)
+        groups = []
+        for key, variants in group_pool.items():
+            if int(key[0]) != int(comp_id):
+                continue
+            variants = sorted(variants, key=lambda v: float(v["adj_score"]), reverse=True)
+            groups.append(variants[0])
+        n = len(groups)
+        if n == 0:
+            continue
+        scale = float(math.log(max(float(va_total.sum()), 2.0)))
+        best_obj = math.inf
+        best_rules: tuple[tuple[tuple[int, ...], str, int], ...] = ()
+        for mask in range(1 << n):
+            signed_feats = []
+            rules = []
+            for i, var in enumerate(groups):
+                if (mask >> i) & 1:
+                    signed_feats.append(var["signed_feat"])
+                    rules.append((var["srcs"], var["sign"], var["tgt"]))
+            obj = fit_bic_from_signed_feats(tr_total, tr_pos, va_total, va_pos, signed_feats)
+            obj += float(sibling_lambda) * scale * float(sibling_union_penalty(rules))
+            if float(obj) < float(best_obj):
+                best_obj = float(obj)
+                best_rules = tuple(rules)
+        preds.update(best_rules)
+    return tuple(sorted(preds))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
@@ -907,6 +1278,13 @@ def main():
     )
     ap.add_argument("--source_kernel_num_bins", type=int, default=50)
     ap.add_argument("--source_kernel_support_mult", type=float, default=3.0)
+    ap.add_argument(
+        "--selection_mode",
+        choices=["exact_top_k", "auto_conditional_redundancy", "auto_sibling_bic"],
+        default="exact_top_k",
+    )
+    ap.add_argument("--max_auto_rules", type=int, default=20)
+    ap.add_argument("--auto_sibling_lambda", type=float, default=4.0)
     ap.add_argument("--topn", type=int, default=40)
     args = ap.parse_args()
 
@@ -942,8 +1320,17 @@ def main():
         kernel_max_cap=float(args.max_lag),
         kernel_support_mult=float(args.source_kernel_support_mult),
     )
-    channel_cache = build_channel_cache(
+    train_cache = build_channel_cache(
         tr_data,
+        channels,
+        fixed_target=int(args.fixed_target),
+        kernel_eval_mode=str(args.source_kernel_mode),
+        kernel_num_bins=int(args.source_kernel_num_bins),
+        kernel_max_cap=float(args.max_lag),
+        kernel_support_mult=float(args.source_kernel_support_mult),
+    )
+    val_cache = build_channel_cache(
+        va_data,
         channels,
         fixed_target=int(args.fixed_target),
         kernel_eval_mode=str(args.source_kernel_mode),
@@ -992,8 +1379,8 @@ def main():
         sup_pen_values,
         components_list,
     ):
-        X_all = (channel_cache["event_q"] > float(thr)).astype(np.int64)
-        y = channel_cache["event_y"].astype(np.int64)
+        X_all = (train_cache["event_q"] > float(thr)).astype(np.int64)
+        y = train_cache["event_y"].astype(np.int64)
         component_defs = []
         base_tables = {}
         for comp_id, comp_sources in enumerate(components):
@@ -1003,6 +1390,7 @@ def main():
                 {
                     "sources": tuple(int(s) for s in comp_sources),
                     "channel_ids": tuple(int(ch) for ch in local_channels),
+                    "global_cols": tuple(int(c) for c in local_cols),
                     "channel_pos": {int(ch): i for i, ch in enumerate(local_channels)},
                 }
             )
@@ -1014,35 +1402,90 @@ def main():
             base_tables[comp_id] = eta
             base_tables[f"support_{comp_id}"] = support
 
-        for quota in quota_values:
-            res_tables = {key: val.copy() for key, val in base_tables.items()}
-            selected = []
-            for order, k in ((1, quota[0]), (2, quota[1]), (3, quota[2])):
-                if k <= 0:
-                    continue
-                rows = select_stage(
-                    res_tables,
-                    component_defs,
-                    channel_by_id,
-                    order=order,
-                    support_pow=float(support_pow),
-                    sup_pen=float(sup_pen),
-                    fixed_target=int(args.fixed_target),
-                )
-                chosen = rows[:k]
-                selected.extend((srcs, sign, tgt) for _, _, _, srcs, sign, tgt, _ in chosen)
-                for _, coef, comp_id, _, _, _, combo in chosen:
-                    local_idxs = tuple(int(component_defs[comp_id]["channel_pos"][int(ch)]) for ch in combo)
-                    apply_rule_to_residual(res_tables[comp_id], local_idxs, coef)
+        if args.selection_mode == "exact_top_k":
+            for quota in quota_values:
+                res_tables = {key: val.copy() for key, val in base_tables.items()}
+                selected = []
+                for order, k in ((1, quota[0]), (2, quota[1]), (3, quota[2])):
+                    if k <= 0:
+                        continue
+                    rows = select_stage(
+                        res_tables,
+                        component_defs,
+                        channel_by_id,
+                        order=order,
+                        support_pow=float(support_pow),
+                        sup_pen=float(sup_pen),
+                        fixed_target=int(args.fixed_target),
+                    )
+                    chosen = rows[:k]
+                    selected.extend((srcs, sign, tgt) for _, _, _, srcs, sign, tgt, _ in chosen)
+                    for _, coef, comp_id, _, _, _, combo in chosen:
+                        local_idxs = tuple(int(component_defs[comp_id]["channel_pos"][int(ch)]) for ch in combo)
+                        apply_rule_to_residual(res_tables[comp_id], local_idxs, coef)
 
-            pred = tuple(sorted(set(selected)))
+                pred = tuple(sorted(set(selected)))
+                results.append(
+                    (
+                        len(gt & set(pred)),
+                        float(thr),
+                        float(support_pow),
+                        float(sup_pen),
+                        quota,
+                        tuple(tuple(int(s) for s in comp) for comp in components),
+                        pred,
+                    )
+                )
+        elif args.selection_mode == "auto_conditional_redundancy":
+            X_val = (val_cache["event_q"] > float(thr)).astype(np.int64)
+            y_val = val_cache["event_y"].astype(np.int64)
+            pred = run_auto_conditional_redundancy(
+                X_train=X_all,
+                y_train=y,
+                X_val=X_val,
+                y_val=y_val,
+                component_defs=component_defs,
+                base_tables=base_tables,
+                channel_by_id=channel_by_id,
+                support_pow=float(support_pow),
+                sup_pen=float(sup_pen),
+                fixed_target=int(args.fixed_target),
+                max_rules=int(args.max_auto_rules),
+            )
             results.append(
                 (
                     len(gt & set(pred)),
                     float(thr),
                     float(support_pow),
                     float(sup_pen),
-                    quota,
+                    ("auto", len(pred)),
+                    tuple(tuple(int(s) for s in comp) for comp in components),
+                    pred,
+                )
+            )
+        else:
+            X_val = (val_cache["event_q"] > float(thr)).astype(np.int64)
+            y_val = val_cache["event_y"].astype(np.int64)
+            pred = run_auto_sibling_bic(
+                X_train=X_all,
+                y_train=y,
+                X_val=X_val,
+                y_val=y_val,
+                component_defs=component_defs,
+                base_tables=base_tables,
+                channel_by_id=channel_by_id,
+                support_pow=float(support_pow),
+                sup_pen=float(sup_pen),
+                fixed_target=int(args.fixed_target),
+                sibling_lambda=float(args.auto_sibling_lambda),
+            )
+            results.append(
+                (
+                    len(gt & set(pred)),
+                    float(thr),
+                    float(support_pow),
+                    float(sup_pen),
+                    ("auto_sibling", len(pred)),
                     tuple(tuple(int(s) for s in comp) for comp in components),
                     pred,
                 )
