@@ -13,6 +13,7 @@ import argparse
 import itertools
 import math
 import pickle
+from collections import defaultdict
 from dataclasses import dataclass
 
 import numpy as np
@@ -1023,6 +1024,174 @@ def sibling_union_penalty(
     return int(pen)
 
 
+def collect_top_group_variants(
+    *,
+    component_defs: list[dict],
+    base_tables: dict,
+    channel_by_id: dict[int, ChannelDef],
+    support_pow: float,
+    sup_pen: float,
+    fixed_target: int,
+) -> dict[int, list[dict]]:
+    group_pool: dict[tuple[int, tuple[int, ...]], dict] = {}
+    for order in (1, 2, 3):
+        rows = select_stage(
+            base_tables,
+            component_defs,
+            channel_by_id,
+            order=order,
+            support_pow=float(support_pow),
+            sup_pen=float(sup_pen),
+            fixed_target=int(fixed_target),
+        )
+        for adj_score, coef, comp_id, srcs, sign, tgt, combo in rows:
+            d = len(component_defs[int(comp_id)]["channel_ids"])
+            local_idxs = tuple(int(component_defs[int(comp_id)]["channel_pos"][int(ch)]) for ch in combo)
+            raw_feat = cell_feature_from_local_idxs(d, local_idxs)
+            sign_mult = 1.0 if str(sign) == "exc" else -1.0
+            item = {
+                "comp_id": int(comp_id),
+                "srcs": tuple(int(s) for s in srcs),
+                "sign": str(sign),
+                "tgt": int(tgt),
+                "adj_score": float(adj_score),
+                "signed_feat": sign_mult * raw_feat,
+            }
+            key = (int(comp_id), tuple(int(s) for s in srcs))
+            prev = group_pool.get(key)
+            if prev is None or float(item["adj_score"]) > float(prev["adj_score"]):
+                group_pool[key] = item
+    by_comp: dict[int, list[dict]] = defaultdict(list)
+    for item in group_pool.values():
+        by_comp[int(item["comp_id"])].append(item)
+    return dict(by_comp)
+
+
+def structural_redundancy_count(
+    rule: tuple[tuple[int, ...], str, int],
+    selected_rules: list[tuple[tuple[int, ...], str, int]],
+) -> int:
+    srcs, sign, tgt = rule
+    set_r = set(int(s) for s in srcs)
+    count = 0
+    for srcs2, sign2, tgt2 in selected_rules:
+        if (srcs2, sign2, tgt2) == rule:
+            continue
+        if str(sign2) != str(sign) or int(tgt2) != int(tgt):
+            continue
+        set_s = set(int(s) for s in srcs2)
+        if set_r < set_s or set_s < set_r:
+            count += 1
+        elif len(set_r) == len(set_s) == len(set_r | set_s) - 1:
+            count += 1
+    return int(count)
+
+
+def redundancy_pair_penalty(
+    rules: list[tuple[tuple[int, ...], str, int]],
+) -> int:
+    by_sign: dict[tuple[str, int], list[tuple[int, ...]]] = {}
+    for srcs, sign, tgt in rules:
+        by_sign.setdefault((str(sign), int(tgt)), []).append(tuple(int(s) for s in srcs))
+    pen = 0
+    for subsets in by_sign.values():
+        for a, b in itertools.combinations(subsets, 2):
+            set_a = set(int(s) for s in a)
+            set_b = set(int(s) for s in b)
+            if set_a < set_b or set_b < set_a:
+                pen += 1
+            elif len(set_a) == len(set_b) and len(set_a | set_b) == len(set_a) + 1:
+                pen += 1
+    return int(pen)
+
+
+def project_component_selection(
+    *,
+    total_tr: np.ndarray,
+    pos_tr: np.ndarray,
+    total_va: np.ndarray,
+    pos_va: np.ndarray,
+    selected_items: list[dict],
+    sibling_lambda: float,
+    projection_lambda: float,
+) -> list[dict]:
+    if len(selected_items) <= 1 or float(projection_lambda) <= 0.0:
+        return list(selected_items)
+    scale = float(math.log(max(float(total_va.sum()), 2.0)))
+    n = len(selected_items)
+    best_obj = math.inf
+    best_items = list(selected_items)
+    for mask in range(1 << n):
+        feats = []
+        rules = []
+        items = []
+        for i, item in enumerate(selected_items):
+            if (mask >> i) & 1:
+                feats.append(item["signed_feat"])
+                items.append(item)
+                rules.append((item["srcs"], item["sign"], item["tgt"]))
+        obj = fit_bic_from_signed_feats(total_tr, pos_tr, total_va, pos_va, feats)
+        obj += float(sibling_lambda) * scale * float(sibling_union_penalty(rules))
+        obj += float(projection_lambda) * scale * float(redundancy_pair_penalty(rules))
+        if float(obj) < float(best_obj):
+            best_obj = float(obj)
+            best_items = list(items)
+    return best_items
+
+
+def prune_component_selection(
+    *,
+    total_tr: np.ndarray,
+    pos_tr: np.ndarray,
+    total_va: np.ndarray,
+    pos_va: np.ndarray,
+    selected_items: list[dict],
+    mode: str,
+    tau: float,
+) -> list[dict]:
+    if mode == "none" or len(selected_items) <= 1:
+        return list(selected_items)
+
+    cur = list(selected_items)
+    scale = float(math.log(max(float(total_va.sum()), 2.0)))
+
+    def bic_of(items: list[dict]) -> float:
+        feats = [it["signed_feat"] for it in items]
+        return fit_bic_from_signed_feats(total_tr, pos_tr, total_va, pos_va, feats)
+
+    while len(cur) > 1:
+        cur_bic = bic_of(cur)
+        cur_rules = [(it["srcs"], it["sign"], it["tgt"]) for it in cur]
+        best_idx = None
+        best_metric = None
+        best_delta = None
+        for idx, item in enumerate(cur):
+            rem = cur[:idx] + cur[idx + 1 :]
+            rem_bic = bic_of(rem)
+            delta = float(rem_bic - cur_bic)
+            if mode == "bic":
+                metric = delta
+            else:
+                red = structural_redundancy_count((item["srcs"], item["sign"], item["tgt"]), cur_rules)
+                metric = float(delta / (1.0 + float(red)))
+            if best_metric is None or float(metric) < float(best_metric):
+                best_idx = idx
+                best_metric = float(metric)
+                best_delta = float(delta)
+        if best_idx is None:
+            break
+        if mode == "bic":
+            stop = float(tau) * 0.5 * scale
+            if float(best_delta) > stop:
+                break
+        else:
+            stop = float(tau) * 0.35 * scale
+            if float(best_metric) > stop:
+                break
+        cur.pop(int(best_idx))
+    return cur
+
+
 def run_auto_conditional_redundancy(
     *,
     X_train: np.ndarray,
@@ -1184,63 +1353,64 @@ def run_auto_sibling_bic(
     sup_pen: float,
     fixed_target: int,
     sibling_lambda: float,
+    projection_lambda: float,
+    post_prune_mode: str,
+    post_prune_tau: float,
 ):
-    group_pool: dict[tuple[int, tuple[int, ...]], list[dict]] = {}
-    for order in (1, 2, 3):
-        rows = select_stage(
-            base_tables,
-            component_defs,
-            channel_by_id,
-            order=order,
-            support_pow=float(support_pow),
-            sup_pen=float(sup_pen),
-            fixed_target=int(fixed_target),
-        )
-        for adj_score, coef, comp_id, srcs, sign, tgt, combo in rows:
-            d = len(component_defs[int(comp_id)]["channel_ids"])
-            local_idxs = tuple(int(component_defs[int(comp_id)]["channel_pos"][int(ch)]) for ch in combo)
-            raw_feat = cell_feature_from_local_idxs(d, local_idxs)
-            sign_mult = 1.0 if str(sign) == "exc" else -1.0
-            item = {
-                "comp_id": int(comp_id),
-                "srcs": tuple(int(s) for s in srcs),
-                "sign": str(sign),
-                "tgt": int(tgt),
-                "adj_score": float(adj_score),
-                "signed_feat": sign_mult * raw_feat,
-            }
-            group_pool.setdefault((int(comp_id), tuple(int(s) for s in srcs)), []).append(item)
+    group_pool = collect_top_group_variants(
+        component_defs=component_defs,
+        base_tables=base_tables,
+        channel_by_id=channel_by_id,
+        support_pow=float(support_pow),
+        sup_pen=float(sup_pen),
+        fixed_target=int(fixed_target),
+    )
 
     preds: set[tuple[tuple[int, ...], str, int]] = set()
     for comp_id, comp in enumerate(component_defs):
         global_cols = [int(c) for c in comp["global_cols"]]
         tr_total, tr_pos = component_cell_counts(X_train[:, global_cols], y_train)
         va_total, va_pos = component_cell_counts(X_val[:, global_cols], y_val)
-        groups = []
-        for key, variants in group_pool.items():
-            if int(key[0]) != int(comp_id):
-                continue
-            variants = sorted(variants, key=lambda v: float(v["adj_score"]), reverse=True)
-            groups.append(variants[0])
+        groups = list(group_pool.get(int(comp_id), []))
         n = len(groups)
         if n == 0:
             continue
         scale = float(math.log(max(float(va_total.sum()), 2.0)))
         best_obj = math.inf
-        best_rules: tuple[tuple[tuple[int, ...], str, int], ...] = ()
+        best_items: list[dict] = []
         for mask in range(1 << n):
             signed_feats = []
+            selected_items = []
             rules = []
             for i, var in enumerate(groups):
                 if (mask >> i) & 1:
                     signed_feats.append(var["signed_feat"])
+                    selected_items.append(var)
                     rules.append((var["srcs"], var["sign"], var["tgt"]))
             obj = fit_bic_from_signed_feats(tr_total, tr_pos, va_total, va_pos, signed_feats)
             obj += float(sibling_lambda) * scale * float(sibling_union_penalty(rules))
             if float(obj) < float(best_obj):
                 best_obj = float(obj)
-                best_rules = tuple(rules)
-        preds.update(best_rules)
+                best_items = list(selected_items)
+        best_items = prune_component_selection(
+            total_tr=tr_total,
+            pos_tr=tr_pos,
+            total_va=va_total,
+            pos_va=va_pos,
+            selected_items=best_items,
+            mode=str(post_prune_mode),
+            tau=float(post_prune_tau),
+        )
+        best_items = project_component_selection(
+            total_tr=tr_total,
+            pos_tr=tr_pos,
+            total_va=va_total,
+            pos_va=va_pos,
+            selected_items=best_items,
+            sibling_lambda=float(sibling_lambda),
+            projection_lambda=float(projection_lambda),
+        )
+        preds.update((it["srcs"], it["sign"], it["tgt"]) for it in best_items)
     return tuple(sorted(preds))
 
 
@@ -1285,6 +1455,9 @@ def main():
     )
     ap.add_argument("--max_auto_rules", type=int, default=20)
     ap.add_argument("--auto_sibling_lambda", type=float, default=4.0)
+    ap.add_argument("--auto_projection_lambda", type=float, default=0.0)
+    ap.add_argument("--auto_post_prune_mode", choices=["none", "bic", "struct"], default="none")
+    ap.add_argument("--auto_post_prune_tau", type=float, default=1.0)
     ap.add_argument("--topn", type=int, default=40)
     args = ap.parse_args()
 
@@ -1478,6 +1651,9 @@ def main():
                 sup_pen=float(sup_pen),
                 fixed_target=int(args.fixed_target),
                 sibling_lambda=float(args.auto_sibling_lambda),
+                projection_lambda=float(args.auto_projection_lambda),
+                post_prune_mode=str(args.auto_post_prune_mode),
+                post_prune_tau=float(args.auto_post_prune_tau),
             )
             results.append(
                 (
