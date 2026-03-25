@@ -149,7 +149,15 @@ def build_partitions(
         return [tuple((s,) for s in source_ids)]
     if mode == "auto_merge":
         return [tuple((s,) for s in source_ids)]
+    if mode == "auto_beam":
+        return [tuple((s,) for s in source_ids)]
     if mode == "auto_hypergraph":
+        return [tuple((s,) for s in source_ids)]
+    if mode == "auto_exact_hypergraph":
+        return [tuple((s,) for s in source_ids)]
+    if mode == "auto_conditional_hypergraph":
+        return [tuple((s,) for s in source_ids)]
+    if mode == "auto_sum_hypergraph":
         return [tuple((s,) for s in source_ids)]
     if mode == "all_partitions":
         return unique_partitions(source_ids, max_block=max_block)
@@ -197,6 +205,27 @@ def source_binary_matrix(
     return np.stack(cols, axis=1) if cols else np.zeros((X_channel.shape[0], 0), dtype=np.int64)
 
 
+def source_soft_matrix(
+    Q_channel: np.ndarray,
+    *,
+    source_ids: tuple[int, ...],
+    channels: list[ChannelDef],
+) -> np.ndarray:
+    source_to_cols: dict[int, list[int]] = defaultdict(list)
+    for j, ch in enumerate(channels):
+        source_to_cols[int(ch.source)].append(int(j))
+    cols = []
+    for src in source_ids:
+        src_cols = source_to_cols.get(int(src), [])
+        if not src_cols:
+            cols.append(np.zeros((Q_channel.shape[0],), dtype=np.float64))
+        elif len(src_cols) == 1:
+            cols.append(Q_channel[:, src_cols[0]].astype(np.float64))
+        else:
+            cols.append(Q_channel[:, src_cols].max(axis=1).astype(np.float64))
+    return np.stack(cols, axis=1) if cols else np.zeros((Q_channel.shape[0], 0), dtype=np.float64)
+
+
 def pair_interaction_score_matrix(
     X_source: np.ndarray,
     y: np.ndarray,
@@ -217,6 +246,76 @@ def pair_interaction_score_matrix(
                 _, coef, sup = pair_row
                 score = float(abs(float(coef)) * (float(sup) / total_n))
             out[(int(source_ids[i]), int(source_ids[j]))] = float(score)
+    return out
+
+
+def pair_multichannel_score_matrix(
+    X_channel: np.ndarray,
+    y: np.ndarray,
+    *,
+    source_ids: tuple[int, ...],
+    channels: list[ChannelDef],
+    channel_by_id: dict[int, ChannelDef],
+    support_pow: float,
+) -> dict[tuple[int, int], float]:
+    source_to_cols: dict[int, list[int]] = defaultdict(list)
+    for j, ch in enumerate(channels):
+        source_to_cols[int(ch.source)].append(int(j))
+    out: dict[tuple[int, int], float] = {}
+    for i in range(len(source_ids)):
+        for j in range(i + 1, len(source_ids)):
+            src_i = int(source_ids[i])
+            src_j = int(source_ids[j])
+            cols = tuple(source_to_cols.get(src_i, []) + source_to_cols.get(src_j, []))
+            if not cols:
+                out[(src_i, src_j)] = 0.0
+                continue
+            local_channel_ids = tuple(int(channels[c].channel_id) for c in cols)
+            local_pos = {int(ch): idx for idx, ch in enumerate(local_channel_ids)}
+            eta, support = component_cell_stats(X_channel[:, cols], y)
+            rows = []
+            best_by_key: dict[tuple[tuple[int, ...], str], dict] = {}
+            d = len(local_channel_ids)
+            total_n = max(float(len(y)), 1.0)
+            for combo, coef, sup in parent_rows(eta, support, local_channel_ids, max_order=2):
+                combo = tuple(int(x) for x in combo)
+                if len(combo) == 0:
+                    continue
+                srcs = tuple(sorted(int(channel_by_id[ch].source) for ch in combo))
+                if len(set(srcs)) != len(combo):
+                    continue
+                sign = "exc" if float(coef) > 0.0 else "inh"
+                row = {
+                    "srcs": srcs,
+                    "sign": sign,
+                    "coef": float(coef),
+                    "support": float(sup),
+                    "combo": combo,
+                    "raw_feat": cell_feature_from_local_idxs(
+                        d,
+                        tuple(int(local_pos[int(ch)]) for ch in combo),
+                    ),
+                }
+                key = (srcs, sign)
+                cur = best_by_key.get(key)
+                score = abs(float(coef)) * (max(float(sup), 1.0) ** float(support_pow))
+                row["score"] = float(score)
+                if cur is None or float(score) > float(cur["score"]):
+                    best_by_key[key] = row
+            collapsed = list(best_by_key.values())
+            pair_score = 0.0
+            pair_key = tuple(sorted((src_i, src_j)))
+            for row in collapsed:
+                if tuple(int(s) for s in row["srcs"]) == pair_key:
+                    neighbor_feats = [
+                        other["raw_feat"]
+                        for other in collapsed
+                        if len(other["srcs"]) == 1 and int(other["srcs"][0]) in pair_key
+                    ]
+                    uniq = conditional_unique_ratio(row["raw_feat"], neighbor_feats, support)
+                    norm_score = abs(float(row["coef"])) * (float(row["support"]) / total_n) * float(uniq)
+                    pair_score = max(pair_score, float(norm_score))
+            out[pair_key] = float(pair_score)
     return out
 
 
@@ -258,55 +357,382 @@ def auto_merge_partition_candidates(
     return out
 
 
+def auto_beam_partition_candidates(
+    source_ids: tuple[int, ...],
+    pair_scores: dict[tuple[int, int], float],
+    *,
+    max_block: int,
+    beam_width: int,
+    max_candidates: int,
+) -> list[tuple[tuple[int, ...], ...]]:
+    start = tuple(sorted(tuple((int(s),)) for s in source_ids))
+    best_score: dict[tuple[tuple[int, ...], ...], float] = {start: 0.0}
+    beam = [(0.0, start)]
+    while beam:
+        cand_best: dict[tuple[tuple[int, ...], ...], float] = {}
+        for cur_score, part in beam:
+            clusters = list(part)
+            for i in range(len(clusters)):
+                for j in range(i + 1, len(clusters)):
+                    a = clusters[i]
+                    b = clusters[j]
+                    if len(a) + len(b) > int(max_block):
+                        continue
+                    gain = 0.0
+                    for sa in a:
+                        for sb in b:
+                            key = tuple(sorted((int(sa), int(sb))))
+                            gain += float(pair_scores.get(key, 0.0))
+                    if gain <= 0.0:
+                        continue
+                    merged = tuple(sorted(a + b))
+                    new_clusters = [clusters[k] for k in range(len(clusters)) if k not in (i, j)] + [merged]
+                    new_part = tuple(sorted(new_clusters))
+                    new_score = float(cur_score + gain)
+                    if new_score > float(best_score.get(new_part, -math.inf)):
+                        best_score[new_part] = new_score
+                    prev = cand_best.get(new_part)
+                    if prev is None or float(new_score) > float(prev):
+                        cand_best[new_part] = new_score
+        if not cand_best:
+            break
+        beam = sorted(((float(sc), part) for part, sc in cand_best.items()), reverse=True)[: max(int(beam_width), 1)]
+    ranked = sorted(
+        best_score.items(),
+        key=lambda kv: (-float(kv[1]), len(kv[0]), kv[0]),
+    )
+    out = [part for part, _ in ranked[: max(int(max_candidates), 1)]]
+    if start not in out:
+        out.append(start)
+    return out
+
+
+def source_subset_hyperedge_scores(
+    X_channel: np.ndarray,
+    y: np.ndarray,
+    *,
+    channels: list[ChannelDef],
+    channel_by_id: dict[int, ChannelDef],
+    support_pow: float,
+) -> dict[tuple[int, ...], float]:
+    if X_channel.shape[1] == 0:
+        return {}
+    channel_ids = tuple(int(ch.channel_id) for ch in channels)
+    eta, support = component_cell_stats(X_channel, y)
+    collapsed = collapse_channel_rows(
+        eta,
+        support,
+        channel_ids,
+        channel_by_id,
+        support_pow=float(support_pow),
+    )
+    out: dict[tuple[int, ...], float] = {}
+    for row in collapsed:
+        srcs = tuple(int(s) for s in row["srcs"])
+        if len(srcs) < 2:
+            continue
+        out[srcs] = max(float(out.get(srcs, 0.0)), float(row["score"]))
+    return out
+
+
+def _fit_univariate_logistic(feat: np.ndarray, y: np.ndarray, *, num_iter: int = 30) -> tuple[float, float, float]:
+    feat = np.asarray(feat, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    mean_rate = float((y.sum() + 0.5) / max(float(len(y)) + 1.0, 1.0))
+    beta = float(logit(mean_rate))
+    theta = 0.0
+    for _ in range(max(int(num_iter), 1)):
+        eta = beta + theta * feat
+        p = _sigmoid(eta)
+        resid = y - p
+        w = np.maximum(p * (1.0 - p), 1e-8)
+        g_beta = float(resid.sum())
+        g_theta = float(np.dot(resid, feat))
+        h_bb = float(w.sum()) + 1e-8
+        h_bt = float(np.dot(w, feat))
+        h_tt = float(np.dot(w, feat * feat)) + 1e-8
+        det = h_bb * h_tt - h_bt * h_bt
+        if det <= 1e-10:
+            break
+        step_beta = (g_beta * h_tt - g_theta * h_bt) / det
+        step_theta = (g_theta * h_bb - g_beta * h_bt) / det
+        step_beta = float(np.clip(step_beta, -1.0, 1.0))
+        step_theta = float(np.clip(step_theta, -1.0, 1.0))
+        beta += step_beta
+        theta += step_theta
+        if abs(step_beta) < 1e-6 and abs(step_theta) < 1e-6:
+            break
+    eta = beta + theta * feat
+    ll = float(np.sum(y * eta - np.logaddexp(0.0, eta)))
+    return float(beta), float(theta), float(ll)
+
+
+def source_subset_sum_activation_scores(
+    Q_source: np.ndarray,
+    y: np.ndarray,
+    *,
+    source_ids: tuple[int, ...],
+    max_order: int = 3,
+    beta_quantile: float = 0.6,
+    min_active_frac: float = 0.01,
+) -> dict[tuple[int, ...], float]:
+    if Q_source.shape[1] == 0 or len(y) == 0:
+        return {}
+    y = np.asarray(y, dtype=np.float64)
+    mean_rate = float((y.sum() + 0.5) / max(float(len(y)) + 1.0, 1.0))
+    ll0 = float(np.sum(y * logit(mean_rate) - np.logaddexp(0.0, logit(mean_rate))))
+    src_pos = {int(s): i for i, s in enumerate(source_ids)}
+    raw: dict[tuple[int, ...], dict] = {}
+    pos_mask = y > 0.5
+    for order in range(1, min(int(max_order), len(source_ids)) + 1):
+        for subset in itertools.combinations(tuple(int(s) for s in source_ids), order):
+            idxs = [int(src_pos[int(s)]) for s in subset]
+            summed = Q_source[:, idxs].sum(axis=1).astype(np.float64)
+            ref = summed[pos_mask] if np.any(pos_mask) else summed
+            beta = float(np.quantile(ref, float(beta_quantile))) if len(ref) > 0 else 0.0
+            feat = np.maximum(summed - beta, 0.0)
+            active_frac = float(np.mean(feat > 1e-8))
+            if active_frac < float(min_active_frac):
+                continue
+            _, theta, ll = _fit_univariate_logistic(feat, y)
+            gain = max(0.0, float(ll - ll0))
+            sign = "exc" if float(theta) > 0.0 else "inh"
+            raw[tuple(int(s) for s in subset)] = {
+                "gain": float(gain),
+                "sign": str(sign),
+            }
+    out: dict[tuple[int, ...], float] = {}
+    for subset, row in raw.items():
+        sign = str(row["sign"])
+        gain = float(row["gain"])
+        parent_best = 0.0
+        if len(subset) > 1:
+            for parent in itertools.combinations(subset, len(subset) - 1):
+                prow = raw.get(tuple(int(s) for s in parent))
+                if prow is None or str(prow["sign"]) != sign:
+                    continue
+                parent_best = max(parent_best, float(prow["gain"]))
+        out[tuple(int(s) for s in subset)] = max(0.0, gain - parent_best)
+    return out
+
+
+def _subset_sum_feature(
+    Q_source: np.ndarray,
+    *,
+    source_pos: dict[int, int],
+    subset: tuple[int, ...],
+    beta_quantile: float,
+    pos_mask: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    idxs = [int(source_pos[int(s)]) for s in subset]
+    summed = Q_source[:, idxs].sum(axis=1).astype(np.float64)
+    ref = summed[pos_mask] if np.any(pos_mask) else summed
+    beta = float(np.quantile(ref, float(beta_quantile))) if len(ref) > 0 else 0.0
+    feat = np.maximum(summed - beta, 0.0)
+    return feat, beta
+
+
+def source_subset_conditional_scores(
+    Q_train: np.ndarray,
+    y_train: np.ndarray,
+    Q_val: np.ndarray,
+    y_val: np.ndarray,
+    *,
+    source_ids: tuple[int, ...],
+    max_order: int = 3,
+    beta_quantile: float = 0.6,
+    min_active_frac: float = 0.01,
+) -> dict[tuple[int, ...], float]:
+    if Q_train.shape[1] == 0 or len(y_train) == 0 or len(y_val) == 0:
+        return {}
+
+    source_pos = {int(s): i for i, s in enumerate(source_ids)}
+    y_train = np.asarray(y_train, dtype=np.float64)
+    y_val = np.asarray(y_val, dtype=np.float64)
+    total_tr = np.ones_like(y_train, dtype=np.float64)
+    total_va = np.ones_like(y_val, dtype=np.float64)
+    pos_mask = y_train > 0.5
+
+    rows: dict[tuple[int, ...], dict] = {}
+    for order in range(1, min(int(max_order), len(source_ids)) + 1):
+        for subset in itertools.combinations(tuple(int(s) for s in source_ids), order):
+            feat_tr, beta = _subset_sum_feature(
+                Q_train,
+                source_pos=source_pos,
+                subset=tuple(int(s) for s in subset),
+                beta_quantile=float(beta_quantile),
+                pos_mask=pos_mask,
+            )
+            active_frac = float(np.mean(feat_tr > 1e-8))
+            if active_frac < float(min_active_frac):
+                continue
+            idxs = [int(source_pos[int(s)]) for s in subset]
+            summed_val = Q_val[:, idxs].sum(axis=1).astype(np.float64)
+            feat_va = np.maximum(summed_val - float(beta), 0.0)
+            if float(np.mean(feat_va > 1e-8)) <= 0.0:
+                continue
+            beta_u, theta_u, ll_u = _fit_univariate_logistic(feat_tr, y_train)
+            sign = "exc" if float(theta_u) > 0.0 else "inh"
+            sign_mult = 1.0 if sign == "exc" else -1.0
+            signed_tr = sign_mult * feat_tr
+            signed_va = sign_mult * feat_va
+            rows[tuple(int(s) for s in subset)] = {
+                "subset": tuple(int(s) for s in subset),
+                "sign": str(sign),
+                "raw_tr": feat_tr,
+                "raw_va": feat_va,
+                "signed_tr": signed_tr,
+                "signed_va": signed_va,
+                "theta_abs": abs(float(theta_u)),
+                "ll_univ_tr": float(ll_u),
+                "active_frac": float(active_frac),
+            }
+
+    out: dict[tuple[int, ...], float] = {}
+    for subset, row in rows.items():
+        signed_base_tr = []
+        signed_base_va = []
+        raw_base_tr = []
+        if len(subset) > 1:
+            for parent in itertools.combinations(subset, len(subset) - 1):
+                prow = rows.get(tuple(int(s) for s in parent))
+                if prow is None or str(prow["sign"]) != str(row["sign"]):
+                    continue
+                signed_base_tr.append(np.asarray(prow["signed_tr"], dtype=np.float64))
+                signed_base_va.append(np.asarray(prow["signed_va"], dtype=np.float64))
+                raw_base_tr.append(np.asarray(prow["raw_tr"], dtype=np.float64))
+        if signed_base_tr:
+            beta_p, theta_p, _ = fit_signed_binomial_model(total_tr, y_train, signed_base_tr)
+            Gp_val = np.stack(signed_base_va, axis=1).astype(np.float64)
+            eta_p_val = float(beta_p) + Gp_val @ theta_p
+            ll_parent = binomial_loglik(total_va, y_val, eta_p_val)
+
+            signed_full_tr = signed_base_tr + [np.asarray(row["signed_tr"], dtype=np.float64)]
+            signed_full_va = signed_base_va + [np.asarray(row["signed_va"], dtype=np.float64)]
+            beta_f, theta_f, _ = fit_signed_binomial_model(total_tr, y_train, signed_full_tr)
+            Gf_val = np.stack(signed_full_va, axis=1).astype(np.float64)
+            eta_f_val = float(beta_f) + Gf_val @ theta_f
+            ll_full = binomial_loglik(total_va, y_val, eta_f_val)
+            delta = max(0.0, float(ll_full - ll_parent))
+            uniq = conditional_unique_ratio(
+                np.asarray(row["raw_tr"], dtype=np.float64),
+                raw_base_tr,
+                total_tr,
+            )
+            out[tuple(int(s) for s in subset)] = float(delta * uniq)
+        else:
+            beta_f, theta_f, _ = fit_signed_binomial_model(
+                total_tr,
+                y_train,
+                [np.asarray(row["signed_tr"], dtype=np.float64)],
+            )
+            eta_f_val = float(beta_f) + np.asarray(row["signed_va"], dtype=np.float64) * float(theta_f[0])
+            mean_rate = float((y_train.sum() + 0.5) / max(float(len(y_train)) + 1.0, 1.0))
+            eta0 = np.full_like(total_va, logit(mean_rate), dtype=np.float64)
+            ll0 = binomial_loglik(total_va, y_val, eta0)
+            ll_full = binomial_loglik(total_va, y_val, eta_f_val)
+            out[tuple(int(s) for s in subset)] = max(0.0, float(ll_full - ll0))
+    return out
+
+
 def auto_hypergraph_partition_candidates(
     source_ids: tuple[int, ...],
-    X_source: np.ndarray,
-    y: np.ndarray,
+    subset_scores: dict[tuple[int, ...], float],
     *,
     max_block: int,
 ) -> list[tuple[tuple[int, ...], ...]]:
-    eta, support = component_cell_stats(X_source, y)
-    rows = parent_rows(eta, support, source_ids, max_order=3)
-    total_n = max(float(len(y)), 1.0)
-    hyperedges = []
-    for srcs, coef, sup in rows:
-        if len(srcs) <= 1:
-            continue
-        score = float(abs(float(coef)) * (float(sup) / total_n))
-        if score <= 0.0:
-            continue
-        hyperedges.append((score, tuple(int(s) for s in srcs)))
-    hyperedges.sort(reverse=True)
-
     clusters = [tuple((int(s),)) for s in source_ids]
     out = [tuple(sorted(clusters))]
     seen = {out[0]}
-
-    def find_cluster_index(src: int, cur_clusters: list[tuple[int, ...]]) -> int | None:
-        for idx, cl in enumerate(cur_clusters):
-            if int(src) in cl:
-                return idx
-        return None
-
-    for _, hedge in hyperedges:
-        idxs = sorted({find_cluster_index(int(s), clusters) for s in hedge})
-        if None in idxs:
-            continue
-        merged_sources = set()
-        for idx in idxs:
-            merged_sources.update(int(x) for x in clusters[int(idx)])
-        if len(merged_sources) > int(max_block):
-            continue
-        if len(idxs) <= 1:
-            continue
-        new_clusters = [clusters[i] for i in range(len(clusters)) if i not in idxs]
-        new_clusters.append(tuple(sorted(merged_sources)))
+    hyperedges = [
+        (tuple(sorted(int(s) for s in subset)), float(score))
+        for subset, score in subset_scores.items()
+        if len(subset) >= 2 and float(score) > 0.0
+    ]
+    while True:
+        best = None
+        for i in range(len(clusters)):
+            for j in range(i + 1, len(clusters)):
+                a = clusters[i]
+                b = clusters[j]
+                if len(a) + len(b) > int(max_block):
+                    continue
+                set_a = set(int(s) for s in a)
+                set_b = set(int(s) for s in b)
+                union = set_a | set_b
+                gain = 0.0
+                for subset, score in hyperedges:
+                    set_u = set(int(s) for s in subset)
+                    if not set_u.issubset(union):
+                        continue
+                    if not (set_u & set_a) or not (set_u & set_b):
+                        continue
+                    gain += float(score)
+                if best is None or float(gain) > float(best[0]):
+                    best = (float(gain), i, j)
+        if best is None or float(best[0]) <= 0.0:
+            break
+        _, i, j = best
+        merged = tuple(sorted(clusters[i] + clusters[j]))
+        new_clusters = [clusters[k] for k in range(len(clusters)) if k not in (i, j)] + [merged]
         new_part = tuple(sorted(new_clusters))
         if new_part in seen:
-            continue
+            break
         seen.add(new_part)
         out.append(new_part)
         clusters = list(new_part)
+    return out
+
+
+def _enumerate_partitions_max_block(
+    source_ids: tuple[int, ...],
+    max_block: int,
+) -> list[tuple[tuple[int, ...], ...]]:
+    out: list[tuple[tuple[int, ...], ...]] = []
+
+    def rec(idx: int, blocks: list[list[int]]) -> None:
+        if idx >= len(source_ids):
+            part = tuple(sorted(tuple(sorted(int(x) for x in blk)) for blk in blocks))
+            out.append(part)
+            return
+        src = int(source_ids[idx])
+        for blk in blocks:
+            if len(blk) >= int(max_block):
+                continue
+            blk.append(src)
+            rec(idx + 1, blocks)
+            blk.pop()
+        blocks.append([src])
+        rec(idx + 1, blocks)
+        blocks.pop()
+
+    rec(0, [])
+    uniq = sorted(set(out), key=lambda part: (len(part), part))
+    return uniq
+
+
+def exact_hypergraph_partition_candidates(
+    source_ids: tuple[int, ...],
+    subset_scores: dict[tuple[int, ...], float],
+    *,
+    max_block: int,
+    max_candidates: int,
+) -> list[tuple[tuple[int, ...], ...]]:
+    all_parts = _enumerate_partitions_max_block(source_ids, int(max_block))
+    ranked = []
+    for part in all_parts:
+        blocks = [set(int(x) for x in blk) for blk in part]
+        score = 0.0
+        for subset, sub_score in subset_scores.items():
+            sub = set(int(x) for x in subset)
+            if any(sub.issubset(block) for block in blocks):
+                score += float(sub_score)
+        ranked.append((float(score), part))
+    ranked.sort(key=lambda x: (-float(x[0]), len(x[1]), x[1]))
+    out = [part for _, part in ranked[: max(int(max_candidates), 1)]]
+    singleton = tuple(sorted(tuple((int(s),)) for s in source_ids))
+    if singleton not in out:
+        out.append(singleton)
     return out
 
 
@@ -1832,8 +2258,10 @@ def main():
     ap.add_argument("--data", required=True)
     ap.add_argument("--config", required=True)
     ap.add_argument("--fixed_target", type=int, default=6)
-    ap.add_argument("--partition_mode", choices=["manual", "singleton", "all_partitions", "auto_merge", "auto_hypergraph"], default="all_partitions")
+    ap.add_argument("--partition_mode", choices=["manual", "singleton", "all_partitions", "auto_merge", "auto_beam", "auto_hypergraph", "auto_exact_hypergraph", "auto_conditional_hypergraph", "auto_sum_hypergraph"], default="all_partitions")
     ap.add_argument("--max_block", type=int, default=4)
+    ap.add_argument("--partition_beam_width", type=int, default=16)
+    ap.add_argument("--partition_max_candidates", type=int, default=32)
     ap.add_argument("--manual_partition", default=None)
     ap.add_argument("--thr_values", default="0.12,0.2,0.25")
     ap.add_argument("--support_pow_values", default="1.0,1.25,1.75,3.0")
@@ -1931,7 +2359,7 @@ def main():
     channel_by_id = {int(ch.channel_id): ch for ch in channels}
     channel_col_by_id = {int(ch.channel_id): i for i, ch in enumerate(channels)}
     source_ids = tuple(sorted({int(ch.source) for ch in channels}))
-    if args.partition_mode in {"auto_merge", "auto_hypergraph"}:
+    if args.partition_mode in {"auto_merge", "auto_beam", "auto_hypergraph", "auto_exact_hypergraph", "auto_conditional_hypergraph", "auto_sum_hypergraph"}:
         components_list = []
     else:
         components_list = build_partitions(
@@ -1974,29 +2402,110 @@ def main():
         X_all = (train_cache["event_q"] > float(thr)).astype(np.int64)
         y = train_cache["event_y"].astype(np.int64)
         local_components_list = [components]
-        if args.partition_mode in {"auto_merge", "auto_hypergraph"}:
+        if args.partition_mode in {"auto_merge", "auto_beam", "auto_hypergraph", "auto_exact_hypergraph", "auto_conditional_hypergraph", "auto_sum_hypergraph"}:
             X_source = source_binary_matrix(
                 X_all,
                 source_ids=source_ids,
                 channels=channels,
             )
+            Q_source = source_soft_matrix(
+                train_cache["event_q"].astype(np.float64),
+                source_ids=source_ids,
+                channels=channels,
+            )
             if args.partition_mode == "auto_merge":
-                pair_scores = pair_interaction_score_matrix(
-                    X_source,
+                pair_scores = pair_multichannel_score_matrix(
+                    X_all,
                     y,
-                    source_ids,
+                    source_ids=source_ids,
+                    channels=channels,
+                    channel_by_id=channel_by_id,
+                    support_pow=float(support_pow),
                 )
                 local_components_list = auto_merge_partition_candidates(
                     source_ids,
                     pair_scores,
                     max_block=int(args.max_block),
                 )
-            else:
+            elif args.partition_mode == "auto_beam":
+                pair_scores = pair_multichannel_score_matrix(
+                    X_all,
+                    y,
+                    source_ids=source_ids,
+                    channels=channels,
+                    channel_by_id=channel_by_id,
+                    support_pow=float(support_pow),
+                )
+                local_components_list = auto_beam_partition_candidates(
+                    source_ids,
+                    pair_scores,
+                    max_block=int(args.max_block),
+                    beam_width=int(args.partition_beam_width),
+                    max_candidates=int(args.partition_max_candidates),
+                )
+            elif args.partition_mode == "auto_hypergraph":
+                subset_scores = source_subset_hyperedge_scores(
+                    X_all,
+                    y,
+                    channels=channels,
+                    channel_by_id=channel_by_id,
+                    support_pow=float(support_pow),
+                )
                 local_components_list = auto_hypergraph_partition_candidates(
                     source_ids,
-                    X_source,
-                    y,
+                    subset_scores,
                     max_block=int(args.max_block),
+                )
+            elif args.partition_mode == "auto_exact_hypergraph":
+                subset_scores = source_subset_hyperedge_scores(
+                    X_all,
+                    y,
+                    channels=channels,
+                    channel_by_id=channel_by_id,
+                    support_pow=float(support_pow),
+                )
+                local_components_list = exact_hypergraph_partition_candidates(
+                    source_ids,
+                    subset_scores,
+                    max_block=int(args.max_block),
+                    max_candidates=int(args.partition_max_candidates),
+                )
+            elif args.partition_mode == "auto_sum_hypergraph":
+                subset_scores = source_subset_sum_activation_scores(
+                    Q_source,
+                    y,
+                    source_ids=source_ids,
+                    max_order=min(int(args.max_block), 3),
+                    beta_quantile=0.6,
+                )
+                subset_scores = {k: v for k, v in subset_scores.items() if len(k) >= 2}
+                local_components_list = exact_hypergraph_partition_candidates(
+                    source_ids,
+                    subset_scores,
+                    max_block=int(args.max_block),
+                    max_candidates=int(args.partition_max_candidates),
+                )
+            else:
+                Q_source_val = source_soft_matrix(
+                    val_cache["event_q"].astype(np.float64),
+                    source_ids=source_ids,
+                    channels=channels,
+                )
+                subset_scores = source_subset_conditional_scores(
+                    Q_source,
+                    y,
+                    Q_source_val,
+                    val_cache["event_y"].astype(np.int64),
+                    source_ids=source_ids,
+                    max_order=min(int(args.max_block), 3),
+                    beta_quantile=0.6,
+                )
+                subset_scores = {k: v for k, v in subset_scores.items() if len(k) >= 2}
+                local_components_list = exact_hypergraph_partition_candidates(
+                    source_ids,
+                    subset_scores,
+                    max_block=int(args.max_block),
+                    max_candidates=int(args.partition_max_candidates),
                 )
         candidate_results = []
         for components in local_components_list:
@@ -2119,7 +2628,7 @@ def main():
                         float(auto_obj),
                     )
                 )
-        if args.partition_mode in {"auto_merge", "auto_hypergraph"} and args.selection_mode == "auto_sibling_bic":
+        if args.partition_mode in {"auto_merge", "auto_beam", "auto_hypergraph", "auto_exact_hypergraph", "auto_conditional_hypergraph", "auto_sum_hypergraph"} and args.selection_mode == "auto_sibling_bic":
             best_cand = min(candidate_results, key=lambda x: float(x[-1]))
             results.append(best_cand[:-1])
         else:
