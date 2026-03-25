@@ -147,6 +147,10 @@ def build_partitions(
         return [tuple((s,) for s in source_ids)]
     if mode == "singleton":
         return [tuple((s,) for s in source_ids)]
+    if mode == "auto_merge":
+        return [tuple((s,) for s in source_ids)]
+    if mode == "auto_hypergraph":
+        return [tuple((s,) for s in source_ids)]
     if mode == "all_partitions":
         return unique_partitions(source_ids, max_block=max_block)
     raise ValueError(f"unknown partition mode: {mode}")
@@ -170,6 +174,140 @@ def component_cell_stats(X: np.ndarray, y: np.ndarray):
         if cnt > 0:
             eta[bits] = logit(float(y[mask].mean()))
     return eta, support
+
+
+def source_binary_matrix(
+    X_channel: np.ndarray,
+    *,
+    source_ids: tuple[int, ...],
+    channels: list[ChannelDef],
+) -> np.ndarray:
+    source_to_cols: dict[int, list[int]] = defaultdict(list)
+    for j, ch in enumerate(channels):
+        source_to_cols[int(ch.source)].append(int(j))
+    cols = []
+    for src in source_ids:
+        src_cols = source_to_cols.get(int(src), [])
+        if not src_cols:
+            cols.append(np.zeros((X_channel.shape[0],), dtype=np.int64))
+        elif len(src_cols) == 1:
+            cols.append(X_channel[:, src_cols[0]].astype(np.int64))
+        else:
+            cols.append(X_channel[:, src_cols].max(axis=1).astype(np.int64))
+    return np.stack(cols, axis=1) if cols else np.zeros((X_channel.shape[0], 0), dtype=np.int64)
+
+
+def pair_interaction_score_matrix(
+    X_source: np.ndarray,
+    y: np.ndarray,
+    source_ids: tuple[int, ...],
+) -> dict[tuple[int, int], float]:
+    out: dict[tuple[int, int], float] = {}
+    n = len(source_ids)
+    total_n = max(float(len(y)), 1.0)
+    for i in range(n):
+        for j in range(i + 1, n):
+            Xi = X_source[:, [i, j]]
+            eta, support = component_cell_stats(Xi, y)
+            rows = parent_rows(eta, support, (int(source_ids[i]), int(source_ids[j])), max_order=2)
+            pair_row = next((row for row in rows if len(row[0]) == 2), None)
+            if pair_row is None:
+                score = 0.0
+            else:
+                _, coef, sup = pair_row
+                score = float(abs(float(coef)) * (float(sup) / total_n))
+            out[(int(source_ids[i]), int(source_ids[j]))] = float(score)
+    return out
+
+
+def auto_merge_partition_candidates(
+    source_ids: tuple[int, ...],
+    pair_scores: dict[tuple[int, int], float],
+    *,
+    max_block: int,
+) -> list[tuple[tuple[int, ...], ...]]:
+    clusters = [tuple((int(s),)) for s in source_ids]
+    out = [tuple(sorted(clusters))]
+    seen = {out[0]}
+    while True:
+        best = None
+        for i in range(len(clusters)):
+            for j in range(i + 1, len(clusters)):
+                a = clusters[i]
+                b = clusters[j]
+                if len(a) + len(b) > int(max_block):
+                    continue
+                score = 0.0
+                for sa in a:
+                    for sb in b:
+                        key = tuple(sorted((int(sa), int(sb))))
+                        score += float(pair_scores.get(key, 0.0))
+                if best is None or float(score) > float(best[0]):
+                    best = (float(score), i, j)
+        if best is None or float(best[0]) <= 0.0:
+            break
+        _, i, j = best
+        merged = tuple(sorted(clusters[i] + clusters[j]))
+        new_clusters = [clusters[k] for k in range(len(clusters)) if k not in (i, j)] + [merged]
+        new_part = tuple(sorted(new_clusters))
+        if new_part in seen:
+            break
+        seen.add(new_part)
+        out.append(new_part)
+        clusters = list(new_part)
+    return out
+
+
+def auto_hypergraph_partition_candidates(
+    source_ids: tuple[int, ...],
+    X_source: np.ndarray,
+    y: np.ndarray,
+    *,
+    max_block: int,
+) -> list[tuple[tuple[int, ...], ...]]:
+    eta, support = component_cell_stats(X_source, y)
+    rows = parent_rows(eta, support, source_ids, max_order=3)
+    total_n = max(float(len(y)), 1.0)
+    hyperedges = []
+    for srcs, coef, sup in rows:
+        if len(srcs) <= 1:
+            continue
+        score = float(abs(float(coef)) * (float(sup) / total_n))
+        if score <= 0.0:
+            continue
+        hyperedges.append((score, tuple(int(s) for s in srcs)))
+    hyperedges.sort(reverse=True)
+
+    clusters = [tuple((int(s),)) for s in source_ids]
+    out = [tuple(sorted(clusters))]
+    seen = {out[0]}
+
+    def find_cluster_index(src: int, cur_clusters: list[tuple[int, ...]]) -> int | None:
+        for idx, cl in enumerate(cur_clusters):
+            if int(src) in cl:
+                return idx
+        return None
+
+    for _, hedge in hyperedges:
+        idxs = sorted({find_cluster_index(int(s), clusters) for s in hedge})
+        if None in idxs:
+            continue
+        merged_sources = set()
+        for idx in idxs:
+            merged_sources.update(int(x) for x in clusters[int(idx)])
+        if len(merged_sources) > int(max_block):
+            continue
+        if len(idxs) <= 1:
+            continue
+        new_clusters = [clusters[i] for i in range(len(clusters)) if i not in idxs]
+        new_clusters.append(tuple(sorted(merged_sources)))
+        new_part = tuple(sorted(new_clusters))
+        if new_part in seen:
+            continue
+        seen.add(new_part)
+        out.append(new_part)
+        clusters = list(new_part)
+    return out
 
 
 def parent_rows(eta: np.ndarray, support: np.ndarray, source_ids: tuple[int, ...], max_order: int = 3):
@@ -1541,6 +1679,7 @@ def run_auto_sibling_bic(
     sign_prune: bool,
     post_prune_mode: str,
     post_prune_tau: float,
+    return_objective: bool = False,
 ):
     group_pool = collect_top_group_variants(
         component_defs=component_defs,
@@ -1552,6 +1691,7 @@ def run_auto_sibling_bic(
     )
 
     preds: set[tuple[tuple[int, ...], str, int]] = set()
+    total_objective = 0.0
     for comp_id, comp in enumerate(component_defs):
         global_cols = [int(c) for c in comp["global_cols"]]
         tr_total, tr_pos = component_cell_counts(X_train[:, global_cols], y_train)
@@ -1669,8 +1809,22 @@ def run_auto_sibling_bic(
                 source_order=tuple(int(s) for s in comp["sources"]),
                 selected_items=best_items,
             )
+        comp_rules = [(it["srcs"], it["sign"], it["tgt"]) for it in best_items]
+        comp_obj = fit_bic_from_signed_feats(
+            tr_total,
+            tr_pos,
+            va_total,
+            va_pos,
+            [it["signed_feat"] for it in best_items],
+        )
+        comp_obj += float(sibling_lambda) * scale * float(sibling_union_penalty(comp_rules))
+        comp_obj += float(projection_lambda) * scale * float(redundancy_pair_penalty(comp_rules))
+        total_objective += float(comp_obj)
         preds.update((it["srcs"], it["sign"], it["tgt"]) for it in best_items)
-    return tuple(sorted(preds))
+    pred_tuple = tuple(sorted(preds))
+    if bool(return_objective):
+        return pred_tuple, float(total_objective)
+    return pred_tuple
 
 
 def main():
@@ -1678,7 +1832,7 @@ def main():
     ap.add_argument("--data", required=True)
     ap.add_argument("--config", required=True)
     ap.add_argument("--fixed_target", type=int, default=6)
-    ap.add_argument("--partition_mode", choices=["manual", "singleton", "all_partitions"], default="all_partitions")
+    ap.add_argument("--partition_mode", choices=["manual", "singleton", "all_partitions", "auto_merge", "auto_hypergraph"], default="all_partitions")
     ap.add_argument("--max_block", type=int, default=4)
     ap.add_argument("--manual_partition", default=None)
     ap.add_argument("--thr_values", default="0.12,0.2,0.25")
@@ -1777,12 +1931,15 @@ def main():
     channel_by_id = {int(ch.channel_id): ch for ch in channels}
     channel_col_by_id = {int(ch.channel_id): i for i, ch in enumerate(channels)}
     source_ids = tuple(sorted({int(ch.source) for ch in channels}))
-    components_list = build_partitions(
-        args.partition_mode,
-        source_ids,
-        max_block=int(args.max_block),
-        manual_partition_text=args.manual_partition,
-    )
+    if args.partition_mode in {"auto_merge", "auto_hypergraph"}:
+        components_list = []
+    else:
+        components_list = build_partitions(
+            args.partition_mode,
+            source_ids,
+            max_block=int(args.max_block),
+            manual_partition_text=args.manual_partition,
+        )
     print(f"partition_mode={args.partition_mode} num_partitions={len(components_list)}")
     print("source_pool:", list(source_ids))
     print("source_summaries:", phase1.get("source_summaries", []))
@@ -1812,125 +1969,161 @@ def main():
         thr_values,
         support_pow_values,
         sup_pen_values,
-        components_list,
+        components_list if components_list else [()],
     ):
         X_all = (train_cache["event_q"] > float(thr)).astype(np.int64)
         y = train_cache["event_y"].astype(np.int64)
-        component_defs = []
-        base_tables = {}
-        for comp_id, comp_sources in enumerate(components):
-            local_channels = [int(ch.channel_id) for ch in channels if int(ch.source) in set(int(s) for s in comp_sources)]
-            local_cols = [int(channel_col_by_id[ch]) for ch in local_channels]
-            component_defs.append(
-                {
-                    "sources": tuple(int(s) for s in comp_sources),
-                    "channel_ids": tuple(int(ch) for ch in local_channels),
-                    "global_cols": tuple(int(c) for c in local_cols),
-                    "channel_pos": {int(ch): i for i, ch in enumerate(local_channels)},
-                }
+        local_components_list = [components]
+        if args.partition_mode in {"auto_merge", "auto_hypergraph"}:
+            X_source = source_binary_matrix(
+                X_all,
+                source_ids=source_ids,
+                channels=channels,
             )
-            if local_cols:
-                eta, support = component_cell_stats(X_all[:, local_cols], y)
+            if args.partition_mode == "auto_merge":
+                pair_scores = pair_interaction_score_matrix(
+                    X_source,
+                    y,
+                    source_ids,
+                )
+                local_components_list = auto_merge_partition_candidates(
+                    source_ids,
+                    pair_scores,
+                    max_block=int(args.max_block),
+                )
             else:
-                eta = np.zeros((1,), dtype=np.float64)
-                support = np.zeros((1,), dtype=np.float64)
-            base_tables[comp_id] = eta
-            base_tables[f"support_{comp_id}"] = support
+                local_components_list = auto_hypergraph_partition_candidates(
+                    source_ids,
+                    X_source,
+                    y,
+                    max_block=int(args.max_block),
+                )
+        candidate_results = []
+        for components in local_components_list:
+            component_defs = []
+            base_tables = {}
+            for comp_id, comp_sources in enumerate(components):
+                local_channels = [int(ch.channel_id) for ch in channels if int(ch.source) in set(int(s) for s in comp_sources)]
+                local_cols = [int(channel_col_by_id[ch]) for ch in local_channels]
+                component_defs.append(
+                    {
+                        "sources": tuple(int(s) for s in comp_sources),
+                        "channel_ids": tuple(int(ch) for ch in local_channels),
+                        "global_cols": tuple(int(c) for c in local_cols),
+                        "channel_pos": {int(ch): i for i, ch in enumerate(local_channels)},
+                    }
+                )
+                if local_cols:
+                    eta, support = component_cell_stats(X_all[:, local_cols], y)
+                else:
+                    eta = np.zeros((1,), dtype=np.float64)
+                    support = np.zeros((1,), dtype=np.float64)
+                base_tables[comp_id] = eta
+                base_tables[f"support_{comp_id}"] = support
 
-        if args.selection_mode == "exact_top_k":
-            for quota in quota_values:
-                res_tables = {key: val.copy() for key, val in base_tables.items()}
-                selected = []
-                for order, k in ((1, quota[0]), (2, quota[1]), (3, quota[2])):
-                    if k <= 0:
-                        continue
-                    rows = select_stage(
-                        res_tables,
-                        component_defs,
-                        channel_by_id,
-                        order=order,
-                        support_pow=float(support_pow),
-                        sup_pen=float(sup_pen),
-                        fixed_target=int(args.fixed_target),
+            if args.selection_mode == "exact_top_k":
+                for quota in quota_values:
+                    res_tables = {key: val.copy() for key, val in base_tables.items()}
+                    selected = []
+                    for order, k in ((1, quota[0]), (2, quota[1]), (3, quota[2])):
+                        if k <= 0:
+                            continue
+                        rows = select_stage(
+                            res_tables,
+                            component_defs,
+                            channel_by_id,
+                            order=order,
+                            support_pow=float(support_pow),
+                            sup_pen=float(sup_pen),
+                            fixed_target=int(args.fixed_target),
+                        )
+                        chosen = rows[:k]
+                        selected.extend((srcs, sign, tgt) for _, _, _, srcs, sign, tgt, _ in chosen)
+                        for _, coef, comp_id, _, _, _, combo in chosen:
+                            local_idxs = tuple(int(component_defs[comp_id]["channel_pos"][int(ch)]) for ch in combo)
+                            apply_rule_to_residual(res_tables[comp_id], local_idxs, coef)
+
+                    pred = tuple(sorted(set(selected)))
+                    candidate_results.append(
+                        (
+                            len(gt & set(pred)),
+                            float(thr),
+                            float(support_pow),
+                            float(sup_pen),
+                            quota,
+                            tuple(tuple(int(s) for s in comp) for comp in components),
+                            pred,
+                            None,
+                        )
                     )
-                    chosen = rows[:k]
-                    selected.extend((srcs, sign, tgt) for _, _, _, srcs, sign, tgt, _ in chosen)
-                    for _, coef, comp_id, _, _, _, combo in chosen:
-                        local_idxs = tuple(int(component_defs[comp_id]["channel_pos"][int(ch)]) for ch in combo)
-                        apply_rule_to_residual(res_tables[comp_id], local_idxs, coef)
-
-                pred = tuple(sorted(set(selected)))
-                results.append(
+            elif args.selection_mode == "auto_conditional_redundancy":
+                X_val = (val_cache["event_q"] > float(thr)).astype(np.int64)
+                y_val = val_cache["event_y"].astype(np.int64)
+                pred = run_auto_conditional_redundancy(
+                    X_train=X_all,
+                    y_train=y,
+                    X_val=X_val,
+                    y_val=y_val,
+                    component_defs=component_defs,
+                    base_tables=base_tables,
+                    channel_by_id=channel_by_id,
+                    support_pow=float(support_pow),
+                    sup_pen=float(sup_pen),
+                    fixed_target=int(args.fixed_target),
+                    max_rules=int(args.max_auto_rules),
+                )
+                candidate_results.append(
                     (
                         len(gt & set(pred)),
                         float(thr),
                         float(support_pow),
                         float(sup_pen),
-                        quota,
+                        ("auto", len(pred)),
                         tuple(tuple(int(s) for s in comp) for comp in components),
                         pred,
+                        None,
                     )
                 )
-        elif args.selection_mode == "auto_conditional_redundancy":
-            X_val = (val_cache["event_q"] > float(thr)).astype(np.int64)
-            y_val = val_cache["event_y"].astype(np.int64)
-            pred = run_auto_conditional_redundancy(
-                X_train=X_all,
-                y_train=y,
-                X_val=X_val,
-                y_val=y_val,
-                component_defs=component_defs,
-                base_tables=base_tables,
-                channel_by_id=channel_by_id,
-                support_pow=float(support_pow),
-                sup_pen=float(sup_pen),
-                fixed_target=int(args.fixed_target),
-                max_rules=int(args.max_auto_rules),
-            )
-            results.append(
-                (
-                    len(gt & set(pred)),
-                    float(thr),
-                    float(support_pow),
-                    float(sup_pen),
-                    ("auto", len(pred)),
-                    tuple(tuple(int(s) for s in comp) for comp in components),
-                    pred,
+            else:
+                X_val = (val_cache["event_q"] > float(thr)).astype(np.int64)
+                y_val = val_cache["event_y"].astype(np.int64)
+                pred, auto_obj = run_auto_sibling_bic(
+                    X_train=X_all,
+                    y_train=y,
+                    X_val=X_val,
+                    y_val=y_val,
+                    component_defs=component_defs,
+                    base_tables=base_tables,
+                    channel_by_id=channel_by_id,
+                    support_pow=float(support_pow),
+                    sup_pen=float(sup_pen),
+                    fixed_target=int(args.fixed_target),
+                    sibling_lambda=float(args.auto_sibling_lambda),
+                    projection_lambda=float(args.auto_projection_lambda),
+                    subset_prune_tau=float(args.auto_subset_prune_tau),
+                    source_projection_lambda=float(args.auto_source_projection_lambda),
+                    sign_prune=bool(args.auto_sign_prune),
+                    post_prune_mode=str(args.auto_post_prune_mode),
+                    post_prune_tau=float(args.auto_post_prune_tau),
+                    return_objective=True,
                 )
-            )
+                candidate_results.append(
+                    (
+                        len(gt & set(pred)),
+                        float(thr),
+                        float(support_pow),
+                        float(sup_pen),
+                        ("auto_sibling", len(pred)),
+                        tuple(tuple(int(s) for s in comp) for comp in components),
+                        pred,
+                        float(auto_obj),
+                    )
+                )
+        if args.partition_mode in {"auto_merge", "auto_hypergraph"} and args.selection_mode == "auto_sibling_bic":
+            best_cand = min(candidate_results, key=lambda x: float(x[-1]))
+            results.append(best_cand[:-1])
         else:
-            X_val = (val_cache["event_q"] > float(thr)).astype(np.int64)
-            y_val = val_cache["event_y"].astype(np.int64)
-            pred = run_auto_sibling_bic(
-                X_train=X_all,
-                y_train=y,
-                X_val=X_val,
-                y_val=y_val,
-                component_defs=component_defs,
-                base_tables=base_tables,
-                channel_by_id=channel_by_id,
-                support_pow=float(support_pow),
-                sup_pen=float(sup_pen),
-                fixed_target=int(args.fixed_target),
-                sibling_lambda=float(args.auto_sibling_lambda),
-                projection_lambda=float(args.auto_projection_lambda),
-                subset_prune_tau=float(args.auto_subset_prune_tau),
-                source_projection_lambda=float(args.auto_source_projection_lambda),
-                sign_prune=bool(args.auto_sign_prune),
-                post_prune_mode=str(args.auto_post_prune_mode),
-                post_prune_tau=float(args.auto_post_prune_tau),
-            )
-            results.append(
-                (
-                    len(gt & set(pred)),
-                    float(thr),
-                    float(support_pow),
-                    float(sup_pen),
-                    ("auto_sibling", len(pred)),
-                    tuple(tuple(int(s) for s in comp) for comp in components),
-                    pred,
-                )
-            )
+            results.extend(c[:-1] for c in candidate_results)
 
     results.sort(reverse=True)
     seen = set()
