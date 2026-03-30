@@ -1,14 +1,26 @@
-"""Synthetic data generator for HNSTPP-Refactored (multiplicative inhibition).
+"""Synthetic data generator for logical TPP benchmarks.
 
 Intensity:
     lambda_k(t) = (b_k + E_k(t)) * exp(-I_k(t)) + eps
 where
     E_k(t) = sum_{r:target(r)=k} W_pos[r] * p_r(t)
     I_k(t) = sum_{r:target(r)=k} W_neg[r] * p_r(t)
-    p_r(t) = ReLU(sum_{src in cond(r)} K_src(t) - bias_r)
+
+Supported rule activations:
+    sum_relu:
+        p_r(t) = ReLU(sum_{src in cond(r)} K_src(t) - bias_r)
+    softmin_relu:
+        p_r(t) = ReLU(softmin_{src in cond(r)} K_src(t) - bias_r)
+    product_bounded:
+        p_r(t) = prod_{src in cond(r)} (1 - exp(-K_src(t)))
+
+The `product_bounded` mode is a smooth conjunction-style activation: all
+sources must be active for the rule to contribute, but each source still
+retains its own temporal kernel.
 """
 
 import numpy as np
+import os
 from collections import defaultdict
 from numba import njit
 from tqdm import tqdm
@@ -69,10 +81,30 @@ def exponential_kernel_func(dt, peak, tau, mix_weight, support_mult):
     return mix_weight * np.exp(-z)
 
 
+@njit(fastmath=True, cache=True, inline='always')
+def flat_kernel_func(dt, width, mix_weight):
+    """Flat piecewise-linear kernel on [0, width]."""
+    if dt <= 0.0 or dt > width:
+        return 0.0
+    return mix_weight / max(width, 1e-12)
+
+
 class Rule:
     """Rule container used by the synthetic generator."""
 
-    def __init__(self, rule_id, target, W_pos, W_neg, condition, kernel_params, kernel_type='triangular', bias=0.0):
+    def __init__(
+        self,
+        rule_id,
+        target,
+        W_pos,
+        W_neg,
+        condition,
+        kernel_params,
+        kernel_type='triangular',
+        bias=0.0,
+        activation_mode='sum_relu',
+        softmin_tau=0.15,
+    ):
         self.rule_id = int(rule_id)
         self.target = int(target)
         self.W_pos = max(0.0, float(W_pos))
@@ -80,6 +112,8 @@ class Rule:
         self.condition = [int(c) for c in condition]
         self.kernel_type = kernel_type
         self.bias = float(bias)
+        self.activation_mode = str(activation_mode)
+        self.softmin_tau = max(float(softmin_tau), 1e-6)
 
         self.kernel_params_arrays = {}
         self.max_support = {}
@@ -96,6 +130,8 @@ class Rule:
             params_array[:, 1] = np.maximum(params_array[:, 1], 1e-6)  # width or sigma
             if self.kernel_type == 'triangular':
                 params_array[:, 0] = np.clip(params_array[:, 0], 1e-6, params_array[:, 1] - 1e-6)  # peak
+            elif self.kernel_type == 'flat':
+                params_array[:, 0] = 0.5 * params_array[:, 1]
             else:
                 params_array[:, 0] = np.maximum(params_array[:, 0], 1e-6)
             params_array[:, 3] = np.maximum(params_array[:, 3], 0.0)
@@ -141,6 +177,8 @@ class Rule:
                     peak, width, mix_weight, support_mult = params[i, 0], params[i, 1], params[i, 2], params[i, 3]
                     if self.kernel_type == 'triangular':
                         val = triangular_kernel_func(dt, peak, width, mix_weight)
+                    elif self.kernel_type == 'flat':
+                        val = flat_kernel_func(dt, width, mix_weight)
                     elif self.kernel_type == 'gaussian':
                         val = gaussian_kernel_func(dt, peak, width, mix_weight, support_mult)
                     elif self.kernel_type == 'exponential':
@@ -153,7 +191,87 @@ class Rule:
 
         return kernel_sum, count_window
 
+    def compute_source_kernel_sums(self, t, event_history_arrays, event_counts):
+        source_sums = []
+        count_window = 0
+        for src_type in self.condition:
+            count = event_counts[src_type]
+            if count == 0:
+                source_sums.append(0.0)
+                continue
+
+            max_support = self.max_support.get(src_type, 0.0)
+            idx = count - 1
+            params = self.kernel_params_arrays.get(src_type)
+            if params is None:
+                source_sums.append(0.0)
+                continue
+
+            src_sum = 0.0
+            while idx >= 0:
+                t_event = event_history_arrays[src_type, idx]
+                dt = t - t_event
+                if dt <= 0.0:
+                    idx -= 1
+                    continue
+                if dt > max_support:
+                    break
+
+                count_window += 1
+                for i in range(len(params)):
+                    peak, width, mix_weight, support_mult = params[i, 0], params[i, 1], params[i, 2], params[i, 3]
+                    if self.kernel_type == 'triangular':
+                        val = triangular_kernel_func(dt, peak, width, mix_weight)
+                    elif self.kernel_type == 'flat':
+                        val = flat_kernel_func(dt, width, mix_weight)
+                    elif self.kernel_type == 'gaussian':
+                        val = gaussian_kernel_func(dt, peak, width, mix_weight, support_mult)
+                    elif self.kernel_type == 'exponential':
+                        val = exponential_kernel_func(dt, peak, width, mix_weight, support_mult)
+                    else:
+                        val = triangular_kernel_func(dt, peak, width, mix_weight)
+                    src_sum += val
+                idx -= 1
+            source_sums.append(float(src_sum))
+        return source_sums, count_window
+
+    def _softmin(self, values):
+        vals = np.asarray(values, dtype=np.float64)
+        if vals.size == 0:
+            return 0.0
+        tau = self.softmin_tau
+        z = -vals / tau
+        zmax = np.max(z)
+        lse = zmax + np.log(np.mean(np.exp(z - zmax)))
+        return float(-tau * lse)
+
     def compute_activation(self, t, event_history_arrays, event_counts):
+        if self.activation_mode == 'product_bounded':
+            src_sums, _ = self.compute_source_kernel_sums(t, event_history_arrays, event_counts)
+            if not src_sums:
+                return 0.0
+            out = 1.0
+            for src_sum in src_sums:
+                out *= (1.0 - np.exp(-max(0.0, float(src_sum))))
+            return float(out)
+        if self.activation_mode == 'softmin_relu':
+            src_sums, _ = self.compute_source_kernel_sums(t, event_history_arrays, event_counts)
+            agg = self._softmin(src_sums)
+            return max(0.0, agg - self.bias)
+        kernel_sum, _ = self.compute_kernel_sum_and_count(t, event_history_arrays, event_counts)
+        return max(0.0, kernel_sum - self.bias)
+
+    def activation_upper_bound(self, t, event_history_arrays, event_counts):
+        """Cheap safe upper bound for p_r(t) used by thinning.
+
+        This is intentionally conservative but activation-aware.
+        """
+        if self.activation_mode == 'product_bounded':
+            # Each bounded source factor lies in [0, 1], so the product does too.
+            return 1.0
+        if self.activation_mode == 'softmin_relu':
+            kernel_sum, _ = self.compute_kernel_sum_and_count(t, event_history_arrays, event_counts)
+            return max(0.0, kernel_sum - self.bias)
         kernel_sum, _ = self.compute_kernel_sum_and_count(t, event_history_arrays, event_counts)
         return max(0.0, kernel_sum - self.bias)
 
@@ -176,7 +294,8 @@ def generate_multiplicative_data(rules, num_samples, time_horizon, base_intensit
 
     rng = np.random.default_rng(seed)
 
-    for _ in tqdm(range(num_samples), leave=False):
+    disable_tqdm = str(os.environ.get("TQDM_DISABLE", "")).lower() in {"1", "true", "yes", "y"}
+    for _ in tqdm(range(num_samples), leave=False, disable=disable_tqdm):
         t_curr = 0.0
         event_history.fill(0.0)
         event_counts_dict = {k: 0 for k in event_types}
@@ -193,8 +312,8 @@ def generate_multiplicative_data(rules, num_samples, time_horizon, base_intensit
                 b_k = base_intensity_array[k_idx]
                 e_bound = 0.0
                 for rule in rules_by_target[k]:
-                    _, count_window = rule.compute_kernel_sum_and_count(t_curr, event_history, event_counts_dict)
-                    e_bound += rule.W_pos * float(count_window)
+                    p_bound = rule.activation_upper_bound(t_curr, event_history, event_counts_dict)
+                    e_bound += rule.W_pos * float(p_bound)
                 lambda_max += max(0.0, b_k + e_bound) + eps
 
             if lambda_max < 0.1:
@@ -280,13 +399,18 @@ def create_rules_from_config(config):
     """Create Rule objects from config dict."""
     rules = []
 
+    default_activation_mode = config.get('activation_mode', 'sum_relu')
+    default_kernel_type = config.get('kernel', 'triangular')
+    default_softmin_tau = config.get('softmin_tau', 0.15)
     for rule_cfg in config.get('rules', []):
         rule_id = rule_cfg['id']
         target = rule_cfg['target']
         W_pos = rule_cfg.get('W_pos', 1.0)
         W_neg = rule_cfg.get('W_neg', 0.0)
-        kernel_type = rule_cfg.get('kernel', 'triangular')
+        kernel_type = rule_cfg.get('kernel', default_kernel_type)
         bias = rule_cfg.get('bias', 0.0)
+        activation_mode = rule_cfg.get('activation_mode', default_activation_mode)
+        softmin_tau = rule_cfg.get('softmin_tau', default_softmin_tau)
 
         condition = set(int(k) for k in rule_cfg['condition'].keys())
 
@@ -309,6 +433,8 @@ def create_rules_from_config(config):
                 kernel_params=kernel_params,
                 kernel_type=kernel_type,
                 bias=bias,
+                activation_mode=activation_mode,
+                softmin_tau=softmin_tau,
             )
         )
 

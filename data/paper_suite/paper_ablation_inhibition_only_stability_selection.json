@@ -1,0 +1,228 @@
+{
+  "repeats": 5,
+  "threshold": 0.6,
+  "baseline_avg_recall": 0.5666666666666667,
+  "baseline_avg_precision": 1.0,
+  "hierarchical_avg_recall": 0.7333333333333334,
+  "hierarchical_avg_precision": 1.0,
+  "baseline_rule_frequency": {
+    "A -> T : inhibition": 5,
+    "B -> T : inhibition": 5,
+    "C and D -> T : inhibition": 3,
+    "E and F -> T : inhibition": 4
+  },
+  "hierarchical_rule_frequency": {
+    "A -> T : inhibition": 5,
+    "B -> T : inhibition": 5,
+    "C and D -> T : inhibition": 5,
+    "C and G and H -> T : inhibition": 2,
+    "E and F -> T : inhibition": 5
+  },
+  "baseline_stable_support": [
+    "A -> T : inhibition",
+    "B -> T : inhibition",
+    "C and D -> T : inhibition",
+    "E and F -> T : inhibition"
+  ],
+  "hierarchical_stable_support": [
+    "A -> T : inhibition",
+    "B -> T : inhibition",
+    "C and D -> T : inhibition",
+    "E and F -> T : inhibition"
+  ],
+  "baseline_stable_metrics": {
+    "recall": 0.6666666666666666,
+    "precision": 1.0,
+    "missing": [
+      "C and G and H -> T : inhibition",
+      "D and F and G -> T : inhibition"
+    ],
+    "extra": []
+  },
+  "hierarchical_stable_metrics": {
+    "recall": 0.6666666666666666,
+    "precision": 1.0,
+    "missing": [
+      "C and G and H -> T : inhibition",
+      "D and F and G -> T : inhibition"
+    ],
+    "extra": []
+  },
+  "per_repeat": [
+    {
+      "repeat": 0,
+      "baseline": {
+        "bic": 26169.50916874091,
+        "recall": 0.5,
+        "precision": 1.0,
+        "preds": [
+          "A -> T : inhibition",
+          "C and D -> T : inhibition",
+          "B -> T : inhibition"
+        ],
+        "missing": [
+          "C and G and H -> T : inhibition",
+          "D and F and G -> T : inhibition",
+          "E and F -> T : inhibition"
+        ],
+        "extra": []
+      },
+      "final": {
+        "bic": 25906.54058221456,
+        "recall": 0.6666666666666666,
+        "precision": 1.0,
+        "preds": [
+          "E and F -> T : inhibition",
+          "A -> T : inhibition",
+          "C and D -> T : inhibition",
+          "B -> T : inhibition"
+        ],
+        "missing": [
+          "C and G and H -> T : inhibition",
+          "D and F and G -> T : inhibition"
+        ],
+        "extra": []
+      }
+    },
+    {
+      "repeat": 1,
+      "baseline": {
+        "bic": 26097.599089236006,
+        "recall": 0.5,
+        "precision": 1.0,
+        "preds": [
+          "E and F -> T : inhibition",
+          "A -> T : inhibition",
+          "B -> T : inhibition"
+        ],
+        "missing": [
+          "C and D -> T : inhibition",
+          "C and G and H -> T : inhibition",
+          "D and F and G -> T : inhibition"
+        ],
+        "extra": []
+      },
+      "final": {
+        "bic": 25836.306230055357,
+        "recall": 0.6666666666666666,
+        "precision": 1.0,
+        "preds": [
+          "E and F -> T : inhibition",
+          "A -> T : inhibition",
+          "C and D -> T : inhibition",
+          "B -> T : inhibition"
+        ],
+        "missing": [
+          "C and G and H -> T : inhibition",
+          "D and F and G -> T : inhibition"
+        ],
+        "extra": []
+      }
+    },
+    {
+      "repeat": 2,
+      "baseline": {
+        "bic": 26057.877311647782,
+        "recall": 0.5,
+        "precision": 1.0,
+        "preds": [
+          "E and F -> T : inhibition",
+          "A -> T : inhibition",
+          "B -> T : inhibition"
+        ],
+        "missing": [
+          "C and D -> T : inhibition",
+          "C and G and H -> T : inhibition",
+          "D and F and G -> T : inhibition"
+        ],
+        "extra": []
+      },
+      "final": {
+        "bic": 25773.942629024637,
+        "recall": 0.6666666666666666,
+        "precision": 1.0,
+        "preds": [
+          "E and F -> T : inhibition",
+          "A -> T : inhibition",
+          "C and D -> T : inhibition",
+          "B -> T : inhibition"
+        ],
+        "missing": [
+          "C and G and H -> T : inhibition",
+          "D and F and G -> T : inhibition"
+        ],
+        "extra": []
+      }
+    },
+    {
+      "repeat": 3,
+      "baseline": {
+        "bic": 26205.728947486587,
+        "recall": 0.6666666666666666,
+        "precision": 1.0,
+        "preds": [
+          "E and F -> T : inhibition",
+          "A -> T : inhibition",
+          "C and D -> T : inhibition",
+          "B -> T : inhibition"
+        ],
+        "missing": [
+          "C and G and H -> T : inhibition",
+          "D and F and G -> T : inhibition"
+        ],
+        "extra": []
+      },
+      "final": {
+        "bic": 25945.595093899166,
+        "recall": 0.8333333333333334,
+        "precision": 1.0,
+        "preds": [
+          "A -> T : inhibition",
+          "C and G and H -> T : inhibition",
+          "C and D -> T : inhibition",
+          "B -> T : inhibition",
+          "E and F -> T : inhibition"
+        ],
+        "missing": [
+          "D and F and G -> T : inhibition"
+        ],
+        "extra": []
+      }
+    },
+    {
+      "repeat": 4,
+      "baseline": {
+        "bic": 26029.002764862307,
+        "recall": 0.6666666666666666,
+        "precision": 1.0,
+        "preds": [
+          "E and F -> T : inhibition",
+          "A -> T : inhibition",
+          "C and D -> T : inhibition",
+          "B -> T : inhibition"
+        ],
+        "missing": [
+          "C and G and H -> T : inhibition",
+          "D and F and G -> T : inhibition"
+        ],
+        "extra": []
+      },
+      "final": {
+        "bic": 25765.59861642983,
+        "recall": 0.8333333333333334,
+        "precision": 1.0,
+        "preds": [
+          "A -> T : inhibition",
+          "C and G and H -> T : inhibition",
+          "C and D -> T : inhibition",
+          "B -> T : inhibition",
+          "E and F -> T : inhibition"
+        ],
+        "missing": [
+          "D and F and G -> T : inhibition"
+        ],
+        "extra": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,112 @@
+{
+  "delta": 0.05,
+  "candidate_set": {
+    "baseline_AB_CD": {
+      "support": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ],
+      "bic": 15088.23922962535,
+      "preds": [
+        "C and D -> T : inhibition",
+        "B -> T : inhibition",
+        "A -> T : inhibition"
+      ],
+      "recall": 0.5,
+      "precision": 1.0
+    },
+    "improved_AB_CD_EF": {
+      "support": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2,
+          3
+        ],
+        [
+          4,
+          5
+        ]
+      ],
+      "bic": 15084.753871016062,
+      "preds": [
+        "C and D -> T : inhibition",
+        "E and F -> T : inhibition",
+        "B -> T : inhibition",
+        "A -> T : inhibition"
+      ],
+      "recall": 0.6666666666666666,
+      "precision": 1.0
+    },
+    "surrogate_AB_CD_F": {
+      "support": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2,
+          3
+        ],
+        [
+          5
+        ]
+      ],
+      "bic": 15082.513636641062,
+      "preds": [
+        "C and D -> T : inhibition",
+        "B -> T : inhibition",
+        "F -> T : inhibition",
+        "A -> T : inhibition"
+      ],
+      "recall": 0.5,
+      "precision": 0.75
+    }
+  },
+  "holdout_order": [
+    [
+      "surrogate_AB_CD_F",
+      15.086113987205664
+    ],
+    [
+      "improved_AB_CD_EF",
+      15.088355293689405
+    ],
+    [
+      "baseline_AB_CD",
+      15.091119938287944
+    ]
+  ],
+  "best": "surrogate_AB_CD_F",
+  "runner_up": "improved_AB_CD_EF",
+  "best_vs_competitors": {
+    "improved_AB_CD_EF": {
+      "avg_loss_gap": 0.0022413064837447827,
+      "penalty_gap": 0.0,
+      "criterion_gap": 0.0022413064837447857,
+      "eps_delta_0p05": 0.01658812238342941,
+      "certified_better": false
+    },
+    "baseline_AB_CD": {
+      "avg_loss_gap": 0.017435167279127608,
+      "penalty_gap": -0.012429216196844381,
+      "criterion_gap": 0.0050059510822832234,
+      "eps_delta_0p05": 0.02227555110435636,
+      "certified_better": false
+    }
+  }
+}

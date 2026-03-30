@@ -1,12 +1,10 @@
-# Synthetic suite A: clean disjoint benchmark
-# Literature-aligned sanity check: disjoint rule families, mixed order/sign,
-# but no shared-source overlap between rules.
-
-seed: 101
+seed: 606
 time_horizon: 120.0
-num_event_types: 10
+num_event_types: 9
 num_samples: 5000
 max_len: 256
+activation_mode: product_bounded
+kernel: triangular
 
 base_intensity:
   0: 0.18
@@ -14,16 +12,15 @@ base_intensity:
   2: 0.17
   3: 0.17
   4: 0.17
-  5: 0.17
+  5: 0.16
   6: 0.16
   7: 0.16
-  8: 0.16
-  9: 0.01
+  8: 0.01
 
 rules:
   - id: 0
-    target: 9
-    W_pos: 2.4
+    target: 8
+    W_pos: 2.2
     W_neg: 0.0
     bias: 0.0
     condition:
@@ -33,9 +30,9 @@ rules:
         mix_weights: [1.0]
 
   - id: 1
-    target: 9
-    W_pos: 0.0
-    W_neg: 2.4
+    target: 8
+    W_pos: 2.2
+    W_neg: 0.0
     bias: 0.0
     condition:
       1:
@@ -44,8 +41,8 @@ rules:
         mix_weights: [1.0]
 
   - id: 2
-    target: 9
-    W_pos: 3.4
+    target: 8
+    W_pos: 3.2
     W_neg: 0.0
     bias: 0.80
     condition:
@@ -59,9 +56,9 @@ rules:
         mix_weights: [1.0]
 
   - id: 3
-    target: 9
-    W_pos: 0.0
-    W_neg: 3.4
+    target: 8
+    W_pos: 3.2
+    W_neg: 0.0
     bias: 0.80
     condition:
       4:
@@ -74,11 +71,15 @@ rules:
         mix_weights: [1.0]
 
   - id: 4
-    target: 9
-    W_pos: 4.0
+    target: 8
+    W_pos: 3.8
     W_neg: 0.0
     bias: 1.45
     condition:
+      2:
+        peaks: [1.2]
+        widths: [4.0]
+        mix_weights: [1.0]
       6:
         peaks: [1.2]
         widths: [4.0]
@@ -87,10 +88,25 @@ rules:
         peaks: [1.2]
         widths: [4.0]
         mix_weights: [1.0]
-      8:
+
+  - id: 5
+    target: 8
+    W_pos: 3.6
+    W_neg: 0.0
+    bias: 1.45
+    condition:
+      3:
+        peaks: [1.2]
+        widths: [4.0]
+        mix_weights: [1.0]
+      5:
+        peaks: [1.2]
+        widths: [4.0]
+        mix_weights: [1.0]
+      6:
         peaks: [1.2]
         widths: [4.0]
         mix_weights: [1.0]
 
 path:
-  output_path: /workspace/data/synthetic_suite_clean_full.pkl
+  output_path: /workspace/data/paper_suite/paper_ablation_excitation_only.pkl

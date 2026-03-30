@@ -1,12 +1,10 @@
-# Synthetic suite C: context-core competition benchmark
-# One component reuses the same core with competing anchors; another component
-# contains nested subset/superset context gating.
-
 seed: 303
 time_horizon: 120.0
 num_event_types: 8
 num_samples: 5000
 max_len: 256
+activation_mode: product_bounded
+kernel: triangular
 
 base_intensity:
   0: 0.18
@@ -125,4 +123,4 @@ rules:
         mix_weights: [1.0]
 
 path:
-  output_path: /workspace/data/synthetic_suite_context_competition_full.pkl
+  output_path: /workspace/data/paper_suite/paper_logical_context.pkl

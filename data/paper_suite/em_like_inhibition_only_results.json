@@ -1,0 +1,117 @@
+{
+  "baseline": {
+    "bic": 14683.110309281774,
+    "recall": 0.8333333333333334,
+    "precision": 1.0,
+    "preds": [
+      "D and F and G -> T : inhibition",
+      "E and F -> T : inhibition",
+      "B -> T : inhibition",
+      "C and D -> T : inhibition",
+      "A -> T : inhibition"
+    ],
+    "missing": [
+      "C and G and H -> T : inhibition"
+    ],
+    "extra": []
+  },
+  "final": {
+    "bic": 14913.714725363969,
+    "recall": 0.5,
+    "precision": 1.0,
+    "preds": [
+      "B -> T : inhibition",
+      "C and D -> T : inhibition",
+      "A -> T : inhibition"
+    ],
+    "missing": [
+      "C and G and H -> T : inhibition",
+      "D and F and G -> T : inhibition",
+      "E and F -> T : inhibition"
+    ],
+    "extra": []
+  },
+  "history": [
+    {
+      "stage": "baseline_refit",
+      "bic": 14683.110309281774,
+      "preds": [
+        "D and F and G -> T : inhibition",
+        "E and F -> T : inhibition",
+        "B -> T : inhibition",
+        "C and D -> T : inhibition",
+        "A -> T : inhibition"
+      ],
+      "recall": 0.8333333333333334,
+      "precision": 1.0
+    },
+    {
+      "stage": "outer_0_screen",
+      "top_triplets": [
+        [
+          [
+            2,
+            6,
+            7
+          ],
+          20.427345184983807
+        ],
+        [
+          [
+            0,
+            2,
+            7
+          ],
+          4.735084716199476
+        ],
+        [
+          [
+            2,
+            4,
+            7
+          ],
+          3.434952740393529
+        ],
+        [
+          [
+            4,
+            6,
+            7
+          ],
+          3.2795777221384794
+        ],
+        [
+          [
+            1,
+            6,
+            7
+          ],
+          3.090023825914123
+        ]
+      ]
+    },
+    {
+      "stage": "outer_0_after_kernel_refit",
+      "chosen_triplet": [
+        2,
+        4,
+        7
+      ],
+      "fixed_bic": 14683.109334416988,
+      "refit_bic": 14913.714725363969,
+      "preds": [
+        "B -> T : inhibition",
+        "C and D -> T : inhibition",
+        "A -> T : inhibition"
+      ],
+      "recall": 0.5,
+      "precision": 1.0,
+      "missing": [
+        "C and G and H -> T : inhibition",
+        "D and F and G -> T : inhibition",
+        "E and F -> T : inhibition"
+      ],
+      "extra": []
+    }
+  ]
+}

@@ -7,7 +7,7 @@ import numpy as np
 
 sys.path.insert(0, '/workspace')
 
-from synthetic import create_rules_from_config, generate_exp_data
+from data.synthetic import create_rules_from_config, generate_exp_data
 
 
 def load_config(path):

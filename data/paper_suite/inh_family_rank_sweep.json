@@ -1,0 +1,172 @@
+{
+  "0.0": {
+    "ablation_inhibition_only": {
+      "recall": 0.5,
+      "precision": 1.0,
+      "matched": [
+        "A -> T : inhibition",
+        "B -> T : inhibition",
+        "C and D -> T : inhibition"
+      ],
+      "missing": [
+        "C and G and H -> T : inhibition",
+        "D and F and G -> T : inhibition",
+        "E and F -> T : inhibition"
+      ],
+      "extra": [],
+      "selected_rule_count": 3,
+      "bic": 14913.765506613969
+    },
+    "num_predicates_20": {
+      "recall": 0.8333333333333334,
+      "precision": 1.0,
+      "matched": [
+        "A -> T : excitation",
+        "B -> T : inhibition",
+        "C and D -> T : excitation",
+        "C and G and H -> T : excitation",
+        "E and F -> T : inhibition"
+      ],
+      "missing": [
+        "D and F and G -> T : inhibition"
+      ],
+      "extra": [],
+      "selected_rule_count": 5,
+      "bic": 38129.66539930729
+    },
+    "num_predicates_30": {
+      "recall": 0.8333333333333334,
+      "precision": 1.0,
+      "matched": [
+        "A -> T : excitation",
+        "B -> T : inhibition",
+        "C and D -> T : excitation",
+        "C and G and H -> T : excitation",
+        "E and F -> T : inhibition"
+      ],
+      "missing": [
+        "D and F and G -> T : inhibition"
+      ],
+      "extra": [],
+      "selected_rule_count": 5,
+      "bic": 30373.68874339311
+    }
+  },
+  "0.5": {
+    "ablation_inhibition_only": {
+      "recall": 0.0,
+      "precision": 0.0,
+      "matched": [],
+      "missing": [
+        "A -> T : inhibition",
+        "B -> T : inhibition",
+        "C and D -> T : inhibition",
+        "C and G and H -> T : inhibition",
+        "D and F and G -> T : inhibition",
+        "E and F -> T : inhibition"
+      ],
+      "extra": [
+        "A and B -> T : inhibition"
+      ],
+      "selected_rule_count": 1,
+      "bic": 15064.390565806985
+    },
+    "num_predicates_20": {
+      "recall": 0.6666666666666666,
+      "precision": 0.6666666666666666,
+      "matched": [
+        "A -> T : excitation",
+        "C and D -> T : excitation",
+        "C and G and H -> T : excitation",
+        "E and F -> T : inhibition"
+      ],
+      "missing": [
+        "B -> T : inhibition",
+        "D and F and G -> T : inhibition"
+      ],
+      "extra": [
+        "A and B -> T : inhibition",
+        "B and C -> T : inhibition"
+      ],
+      "selected_rule_count": 6,
+      "bic": 38328.9070335671
+    },
+    "num_predicates_30": {
+      "recall": 0.6666666666666666,
+      "precision": 0.8,
+      "matched": [
+        "A -> T : excitation",
+        "C and D -> T : excitation",
+        "C and G and H -> T : excitation",
+        "E and F -> T : inhibition"
+      ],
+      "missing": [
+        "B -> T : inhibition",
+        "D and F and G -> T : inhibition"
+      ],
+      "extra": [
+        "A and B -> T : inhibition"
+      ],
+      "selected_rule_count": 5,
+      "bic": 30426.673242732424
+    }
+  },
+  "1.0": {
+    "ablation_inhibition_only": {
+      "recall": 0.0,
+      "precision": 0.0,
+      "matched": [],
+      "missing": [
+        "A -> T : inhibition",
+        "B -> T : inhibition",
+        "C and D -> T : inhibition",
+        "C and G and H -> T : inhibition",
+        "D and F and G -> T : inhibition",
+        "E and F -> T : inhibition"
+      ],
+      "extra": [
+        "A and B -> T : inhibition"
+      ],
+      "selected_rule_count": 1,
+      "bic": 15059.148378306985
+    },
+    "num_predicates_20": {
+      "recall": 0.6666666666666666,
+      "precision": 0.8,
+      "matched": [
+        "A -> T : excitation",
+        "C and D -> T : excitation",
+        "C and G and H -> T : excitation",
+        "E and F -> T : inhibition"
+      ],
+      "missing": [
+        "B -> T : inhibition",
+        "D and F and G -> T : inhibition"
+      ],
+      "extra": [
+        "A and B -> T : inhibition"
+      ],
+      "selected_rule_count": 5,
+      "bic": 38333.02686111302
+    },
+    "num_predicates_30": {
+      "recall": 0.5,
+      "precision": 0.75,
+      "matched": [
+        "A -> T : excitation",
+        "C and D -> T : excitation",
+        "C and G and H -> T : excitation"
+      ],
+      "missing": [
+        "B -> T : inhibition",
+        "D and F and G -> T : inhibition",
+        "E and F -> T : inhibition"
+      ],
+      "extra": [
+        "A and B -> T : inhibition"
+      ],
+      "selected_rule_count": 4,
+      "bic": 30469.435668643084
+    }
+  }
+}
