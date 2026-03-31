@@ -1,0 +1,37 @@
+{
+  "ablation_mixed_sign": {
+    "name": "ablation_mixed_sign",
+    "config_path": "/home/yangmg1216/hnstpp/data/paper_suite/paper_ablation_mixed_sign.yaml",
+    "elapsed_sec": 1646.5129306316376,
+    "anchor_bic": 51168.80193769413,
+    "bic": 50698.768259526434,
+    "correction_accepted": true,
+    "candidate_count": 1,
+    "search_nodes": 3,
+    "selected_additions": [
+      "B and C and H -> T : inhibition"
+    ],
+    "true_rule": [
+      "A -> T : excitation",
+      "B -> T : inhibition",
+      "C and D -> T : excitation",
+      "C and G and H -> T : excitation",
+      "D and F and G -> T : inhibition",
+      "E and F -> T : inhibition"
+    ],
+    "matched_rule": [
+      "A -> T : excitation",
+      "B -> T : inhibition",
+      "C and D -> T : excitation",
+      "C and G and H -> T : excitation",
+      "D and F and G -> T : inhibition",
+      "E and F -> T : inhibition"
+    ],
+    "missing_rule": [],
+    "extra_rule": [
+      "B and C and H -> T : inhibition"
+    ],
+    "recall": 1.0,
+    "precision": 0.8571428571428571
+  }
+}

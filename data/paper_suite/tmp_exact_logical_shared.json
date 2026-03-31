@@ -1,0 +1,41 @@
+{
+  "logical_shared": {
+    "name": "logical_shared",
+    "config_path": "/home/yangmg1216/hnstpp/data/paper_suite/paper_logical_shared.yaml",
+    "elapsed_sec": 2052.550372838974,
+    "anchor_bic": 72951.96275523352,
+    "bic": 72454.20578234032,
+    "correction_accepted": true,
+    "candidate_count": 2,
+    "search_nodes": 5,
+    "selected_additions": [
+      "A and C and D -> T : inhibition",
+      "A and F -> T : inhibition"
+    ],
+    "true_rule": [
+      "A -> T : inhibition",
+      "A and B -> T : excitation",
+      "B and E and F -> T : inhibition",
+      "C -> T : excitation",
+      "C and D -> T : inhibition",
+      "D -> T : excitation",
+      "E and F -> T : excitation"
+    ],
+    "matched_rule": [
+      "A -> T : inhibition",
+      "A and B -> T : excitation",
+      "B and E and F -> T : inhibition",
+      "C -> T : excitation",
+      "C and D -> T : inhibition",
+      "D -> T : excitation",
+      "E and F -> T : excitation"
+    ],
+    "missing_rule": [],
+    "extra_rule": [
+      "A and C and D -> T : inhibition",
+      "A and F -> T : inhibition"
+    ],
+    "recall": 1.0,
+    "precision": 0.7777777777777778
+  }
+}

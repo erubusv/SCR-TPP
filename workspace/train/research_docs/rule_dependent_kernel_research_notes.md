@@ -1637,3 +1637,420 @@ Interpretation:
 - so the current staged family search is a credible improvement for pair-level
   inhibition recovery, but not yet a solution to higher-order inhibition
   recovery in the official `target=0.05` pure-inhibition regime
+
+### 41. Frozen-Kernel Exact Add-Only Correction Removes Missing Rules Across The Official Benchmarks, But Still Over-Adds
+
+We then tested a broader exact support-correction prototype on top of the
+official learned baseline anchor.
+
+Protocol:
+- run the official baseline through active-set fitting, family refinement, and
+  post-prune
+- freeze the learned kernels at that anchor
+- keep the current active support fixed and correct only the **inactive
+  inhibition** rules
+- consider every inactive singleton/pair/triplet whose local fixed-kernel score
+  is inhibitory and has positive gain
+- solve the exact fixed-kernel penalized objective over supports of the form
+  `A union T` with `|T| <= 4`, where `A` is the anchor support
+- run a short full refit only for the chosen addition set and accept it only if
+  the refit BIC improves
+- do **not** use oracle rules in the search; use ground truth only for final
+  evaluation
+
+Result on the full official benchmark suite:
+- all `12/12` benchmark datasets ended with:
+  - empty missing-rule set
+  - recall `1.0`
+- exact recovery with precision `1.0` on:
+  - `kernel_triangular`
+  - `kernel_exponential`
+  - `num_predicates_10`
+  - `num_predicates_20`
+  - `ablation_excitation_only`
+- one extra rule with precision `0.857` on:
+  - `logical_clean_plus`
+  - `kernel_gaussian`
+  - `num_predicates_30`
+  - `ablation_inhibition_only`
+  - `ablation_mixed_sign`
+- two extra rules with precision `0.778` on:
+  - `logical_shared`
+  - `logical_context`
+
+Important hard-case outcomes:
+- `paper_num_predicates_20`:
+  - recovered the missing true triplet `DFG inh`
+  - final support matched the full truth exactly
+- `paper_num_predicates_30`:
+  - recovered the missing true triplet `DFG inh`
+  - but also added the extra surrogate `FNU inh`
+- `paper_ablation_inhibition_only`:
+  - recovered `EF inh`, `CGH inh`, and `DFG inh`
+  - but also added the extra surrogate `AEF inh`
+
+What we learned:
+- This is the first oracle-free prototype that removes **all missing rules**
+  across the official benchmark suite under the current learned-kernel
+  pipeline.
+- So the bottleneck is no longer that true higher-order inhibition is
+  completely invisible to the learned representation.
+- Instead, once the missing triplets become reachable, the main remaining
+  failure mode is **over-admission of extra inhibitory proxies**.
+- This strongly suggests that fixed-kernel exact correction is the right
+  backbone, but the current **add-only** neighborhood is too asymmetric.
+- The next step should be an exact `add/drop/swap` neighborhood correction, or
+  an exact post-correction prune, so that extra rules are rejected by the same
+  objective rather than left to heuristic cleanup.
+
+### 42. Frozen-Kernel Exact Block Solver Is Directionally Right, But Still Too Expensive And Not Yet Strong Enough
+
+We then tested a stricter prototype that moves closer to the intended
+heuristic-free direction:
+
+- keep `family refine` only as a warm-start kernel stage
+- remove `post-prune`
+- freeze the learned kernels after the warm-start stage
+- run an exact **block** support solver on the frozen features
+- solve excitation and inhibition supports separately, with exact
+  support-fixed block fits and exact `add/drop` neighborhood comparisons
+- use the exact block-solver output itself as the final reported model, without
+  a later heuristic post-processing step
+
+This prototype is still not the final desired solver, because the current
+implementation dropped `swap` moves to keep runtime manageable.
+
+Observed benchmark results:
+- `paper_ablation_inhibition_only`:
+  - runtime about `223s`
+  - final support recovered `5/6`
+  - precision `1.0`
+  - the only missing rule was `CGH inh`
+- `paper_logical_context`:
+  - runtime about `1096s`
+  - final support recovered all true rules
+  - recall `1.0`
+  - precision `0.778`
+  - extra rules were `AB inh` and `BE inh`
+
+Operational result on the full suite:
+- we launched the same exact block solver across all official benchmarks
+- but under the available resource budget, only the above completed runs
+  finished quickly enough to be informative
+- the remaining benchmarks were still running after a long wall-clock time, so
+  the sweep was stopped instead of continuing to burn CPU
+
+What we learned:
+- The exact block-solver direction is **real**: even without `post-prune`, it
+  can improve the hard pure-inhibition case from the old `3/6` regime up to
+  `5/6` while keeping precision `1.0`.
+- But the current `add/drop` neighborhood is still not strong enough to finish
+  the hardest pure-inhibition recovery (`CGH inh` remained missing).
+- At the same time, it can still over-admit extra inhibition rules on mixed
+  logical benchmarks (`logical_context`).
+- Most importantly, the current exact block implementation is still too slow
+  for an all-benchmark sweep under practical resource limits.
+
+Updated conclusion:
+- Replacing heuristics with frozen-kernel exact block correction is
+  directionally correct.
+- However, **exactness alone is not enough**: we still need a better
+  neighborhood design and/or stronger safe screening to make the solver both
+  accurate and computationally practical.
+- The next practical target is not merely "run the exact block solver longer",
+  but "make the exact solver cheaper and sharper", likely through stronger
+  admissible screening and a more selective neighborhood construction.
+
+### 43. Swap + Stronger Screening Improves Stability On 9/12 Benchmarks, But The 20/30-Predicate Tail Remains A Severe Runtime Bottleneck
+
+We then upgraded the frozen-kernel exact block prototype to include a stronger
+neighborhood:
+
+- keep `family refine` only as a warm-start stage
+- remove `post-prune`
+- freeze the learned kernels after warm-start
+- add exact `swap` evaluation on top of exact `add/drop`
+- use stronger inhibition screening before expensive support solves
+  - derivative-positive screening
+  - exact 1D scalar-gain screening for inhibition additions
+- keep the final reported model equal to the exact block-solver output
+
+Implementation note:
+- during the sweep we found and fixed two empty-support bugs
+  - empty excitation block column construction
+  - empty inhibition support passed to `scipy.optimize.minimize`
+- after those fixes, the rerun produced valid outputs for 9 benchmarks
+  without runtime errors
+
+Completed benchmark results so far (`9/12`):
+- `paper_ablation_excitation_only`:
+  - recall `1.0`, precision `1.0`
+  - no missing rules, no extra rules
+- `paper_ablation_inhibition_only`:
+  - recall `0.833`, precision `1.0`
+  - missing `CGH inh`
+  - no extra rules
+- `paper_ablation_mixed_sign`:
+  - recall `1.0`, precision `1.0`
+  - no missing rules, no extra rules
+- `paper_kernel_robustness_exponential`:
+  - recall `1.0`, precision `1.0`
+  - no missing rules, no extra rules
+- `paper_kernel_robustness_triangular`:
+  - recall `1.0`, precision `1.0`
+  - no missing rules, no extra rules
+- `paper_logical_clean_plus`:
+  - recall `1.0`, precision `0.857`
+  - extra rule `L exc`
+- `paper_logical_context`:
+  - recall `1.0`, precision `0.778`
+  - extra rules `ABD inh`, `AEG exc`
+- `paper_logical_shared`:
+  - recall `1.0`, precision `0.875`
+  - extra rule `ACD inh`
+- `paper_num_predicates_10`:
+  - recall `1.0`, precision `1.0`
+  - no missing rules, no extra rules
+
+Still running / not yet completed at the time of this note:
+- `paper_kernel_robustness_gaussian`
+- `paper_num_predicates_20`
+- `paper_num_predicates_30`
+
+Operational observation:
+- the remaining three runs are exactly the cases we expected to be hardest
+- the `20/30`-predicate runs in particular grew to very large resident memory
+  usage during exact neighborhood search
+- so the new solver is clearly more practical than the earlier exact
+  `add/drop` prototype on many datasets, but the tail runtime is still a major
+  research bottleneck
+
+What we learned:
+- adding `swap` plus stronger inhibition screening is a real improvement
+  relative to the earlier strict exact-block prototype
+- on the completed subset, this version is much more stable:
+  - `excitation_only`, `mixed_sign`, and both completed kernel-robustness
+    benchmarks are exact
+  - `logical_clean_plus` and `logical_shared` keep full recall with fewer
+    extras than the older heuristic-heavy pipeline
+- however, the hardest pure-inhibition failure remains exactly the same:
+  `CGH inh` is still missing in `inhibition_only`
+- so the main remaining open problems are now sharply separated:
+  - **accuracy**: recover `CGH inh` without reintroducing extras
+  - **scalability**: make exact swap neighborhoods tractable for the
+    `20/30`-predicate cases
+
+### 44. Parallel Exact Support Solves Give A Real Wall-Time Win Without Changing The Solution
+
+To test a low-risk acceleration that preserves the exact solver semantics, we
+stopped the long-running benchmark jobs and modified the exact block solver so
+that independent support solves inside the `add/drop/swap` neighborhood are
+evaluated in parallel.
+
+What changed:
+- the solver still evaluates exactly the same candidate supports
+- the candidate counts and exact neighborhood logic are unchanged
+- only the expensive `fit_exc_support(...)` and `fit_inh_support(...)` calls
+  are dispatched in parallel batches
+- BLAS threads are clamped to `1` inside the parallel region to avoid
+  oversubscription
+
+Validation experiment:
+- benchmark: `paper_ablation_inhibition_only`
+- same solver, same data, same `opt_steps=40`, same `max_rounds=8`
+- compare:
+  - `support_workers=1`
+  - `support_workers=8`
+
+Observed result:
+- `support_workers=1`:
+  - elapsed `476.0s`
+  - recall `0.833`
+  - precision `1.0`
+  - missing `CGH inh`
+- `support_workers=8`:
+  - elapsed `348.1s`
+  - recall `0.833`
+  - precision `1.0`
+  - missing `CGH inh`
+
+Speed effect:
+- wall time improved from `476.0s` to `348.1s`
+- this is about a `1.37x` speedup, or roughly `27%` less wall time
+
+What we learned:
+- parallel support solving is a clean first acceleration because it does not
+  change the exact neighborhood being searched
+- the solution quality on the tested case is effectively unchanged
+- the speedup is real but moderate
+- this means parallel support solving alone is not enough to fix the
+  `20/30`-predicate bottleneck
+- the next bigger speed win is still likely to come from reducing the number
+  of exact support solves, especially on the excitation side where screening is
+  still weaker than on inhibition
+
+### 45. Batched Exact-Same Screening Adds Another Small But Clean Speedup
+
+After parallelizing support solves, we applied another acceleration that keeps
+the exact neighborhood logic unchanged:
+
+- excitation derivative screening was vectorized in batches
+- inhibition derivative screening was vectorized in batches
+- inhibition exact 1D scalar-gain checks were parallelized
+- no candidate acceptance criterion was changed
+- the support search still visits the same logical neighborhood as before
+
+Validation on the same fastest completed benchmark:
+- benchmark: `paper_ablation_inhibition_only`
+- compare:
+  - `support_workers=1` baseline
+  - `support_workers=8` after parallel support solves
+  - `support_workers=8` + batched screening
+
+Observed results:
+- baseline (`workers=1`):
+  - elapsed `476.0s`
+  - recall `0.833`
+  - precision `1.0`
+  - missing `CGH inh`
+- parallel support solves only (`workers=8`):
+  - elapsed `348.1s`
+  - recall `0.833`
+  - precision `1.0`
+  - missing `CGH inh`
+- parallel support solves + batched screening:
+  - elapsed `323.6s`
+  - recall `0.833`
+  - precision `1.0`
+  - missing `CGH inh`
+
+Speed effect:
+- relative to the original `workers=1` baseline:
+  - `476.0s -> 323.6s`
+  - about `1.47x` faster
+- relative to support-parallelization only:
+  - `348.1s -> 323.6s`
+  - about `1.08x` faster
+
+What we learned:
+- batched exact-same screening is worth keeping
+- it gives a smaller gain than parallel support solving, but still reduces
+  wall time without changing the recovered support
+- the combined clean acceleration is now material on the easy benchmark
+- however, the gain is still far smaller than what we need for the
+  `20/30`-predicate tail, so the next major improvement still has to come from
+  stronger safe pruning of the swap neighborhood itself
+
+### 46. On The Fastest Benchmark, `support_workers=16` Was The Best Exact-Preserving Setting We Tested
+
+We then did a small worker-count sweep on the same benchmark
+`paper_ablation_inhibition_only`, keeping the exact same solver logic and the
+same batched screening implementation.
+
+Observed wall times:
+- `support_workers=1`: `476.0s`
+- `support_workers=8`: `323.6s`
+- `support_workers=16`: `319.9s`
+- `support_workers=24`: `337.8s`
+
+All four runs had effectively identical output:
+- recall `0.833`
+- precision `1.0`
+- same missing rule `CGH inh`
+- no extra rules
+
+What we learned:
+- for this small benchmark, the best exact-preserving configuration we tested
+  is `support_workers=16`
+- the improvement beyond `8` workers is real but small
+- pushing to `24` workers is already too much and loses time to overhead
+- so the current "fastest rigorous setting" for small cases is roughly:
+  - batched screening
+  - parallel support solves
+  - `support_workers` around `16`
+
+### 47. Matrix-Store Reuse Was Not Worth Keeping
+
+We also tested a more invasive but still exact-preserving optimization:
+
+- pre-pack all rule feature arrays into dense matrices once
+- replace repeated column construction from `arrays_all` with column slicing
+
+This looked attractive because the exact solver repeatedly rebuilds support
+matrices during screening and support fitting.
+
+However, on `paper_ablation_inhibition_only` with the already-optimized exact
+solver (`support_workers=16`), this change was slightly slower in wall time
+than the simpler batched-screening version, while producing the same result.
+
+What we learned:
+- on the tested case, matrix-store packing overhead outweighed the savings
+- we therefore reverted this optimization rather than keeping extra code
+- the best exact-preserving configuration remains:
+  - batched screening
+  - parallel support solves
+  - `support_workers` around `16`
+
+### 48. Current Status Summary As Of 2026-04-01
+
+Current best exact-support-search direction:
+- `family refine` only as warm-start
+- no `post-prune`
+- freeze learned kernels after warm-start
+- exact frozen-kernel block correction for excitation/inhibition
+- `add/drop/swap` neighborhood
+- stronger inhibition screening
+- exact-preserving speedups:
+  - parallel support solves
+  - batched screening
+  - `support_workers` around `16`
+
+What is now established:
+- `inhibition-only` is not impossible in principle
+  - true fixed features still make full truth win
+- the main failure is not lack of signal, but support-search failure under
+  learned kernels
+- frozen-kernel exact correction is the right backbone
+- the stricter exact-block direction works on many official benchmarks
+- on the completed benchmark subset, the solver is often exact or near-exact
+
+Best completed benchmark status from the latest strict sweep:
+- exact (`recall=1.0`, `precision=1.0`):
+  - `ablation_excitation_only`
+  - `ablation_mixed_sign`
+  - `kernel_exponential`
+  - `kernel_triangular`
+  - `num_predicates_10`
+- full recall but with extras:
+  - `logical_clean_plus`
+  - `logical_context`
+  - `logical_shared`
+- still missing one true triplet:
+  - `ablation_inhibition_only` misses `CGH inh`
+
+Unresolved heavy-tail runtime cases from the strict sweep:
+- `kernel_gaussian`
+- `num_predicates_20`
+- `num_predicates_30`
+
+Current best exact-preserving speed result on the fastest benchmark
+(`paper_ablation_inhibition_only`):
+- original strict solver baseline: `476.0s`
+- current best exact-preserving configuration: `319.9s`
+- speedup: about `1.49x`
+- recovered support unchanged
+
+What remains hardest:
+- accuracy:
+  - recover `CGH inh` in `inhibition-only`
+  - reduce extras in the logical benchmarks
+- scalability:
+  - make `20/30 predicates` tractable without giving up exact/provable support
+    search
+
+Current recommendation:
+- keep the present exact-support-search backbone
+- keep the exact-preserving speedups that already helped
+- focus next on stronger **safe pruning / admissible upper bounds** for the
+  swap neighborhood, since that is the most likely source of a step-change in
+  runtime while keeping the method logically rigorous

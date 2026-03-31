@@ -1,0 +1,6 @@
+{
+  "ablation_inhibition_only": {
+    "name": "ablation_inhibition_only",
+    "error": "TypeError: only size-1 arrays can be converted to Python scalars"
+  }
+}

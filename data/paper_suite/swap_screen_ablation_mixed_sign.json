@@ -1,0 +1,49 @@
+{
+  "ablation_mixed_sign": {
+    "name": "ablation_mixed_sign",
+    "config_path": "/home/yangmg1216/hnstpp/data/paper_suite/paper_ablation_mixed_sign.yaml",
+    "elapsed_sec": 1132.8116102218628,
+    "anchor_bic": 50689.87925833563,
+    "bic": 50690.16382136302,
+    "true_rule": [
+      "A -> T : excitation",
+      "B -> T : inhibition",
+      "C and D -> T : excitation",
+      "C and G and H -> T : excitation",
+      "D and F and G -> T : inhibition",
+      "E and F -> T : inhibition"
+    ],
+    "matched_rule": [
+      "A -> T : excitation",
+      "B -> T : inhibition",
+      "C and D -> T : excitation",
+      "C and G and H -> T : excitation",
+      "D and F and G -> T : inhibition",
+      "E and F -> T : inhibition"
+    ],
+    "missing_rule": [],
+    "extra_rule": [],
+    "recall": 1.0,
+    "precision": 1.0,
+    "round_logs": [
+      {
+        "round": 1,
+        "exc_bic": 50690.16382136302,
+        "inh_bic": 50690.05213941029,
+        "exc_rules": 3,
+        "inh_rules": 3,
+        "exc_add_candidates": 39,
+        "inh_add_candidates": 0,
+        "exc_add_evals": 39,
+        "inh_add_evals": 0,
+        "exc_drop_evals": 3,
+        "inh_drop_evals": 3,
+        "exc_swap_evals": 208,
+        "inh_swap_evals": 196,
+        "exc_support_evals": 251,
+        "inh_support_evals": 200,
+        "changed": false
+      }
+    ]
+  }
+}

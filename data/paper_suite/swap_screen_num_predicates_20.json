@@ -1,0 +1,49 @@
+{
+  "num_predicates_20": {
+    "name": "num_predicates_20",
+    "config_path": "/home/yangmg1216/hnstpp/data/paper_suite/paper_num_predicates_20.yaml",
+    "elapsed_sec": 4736.480615615845,
+    "anchor_bic": 37683.108007330586,
+    "bic": 37676.99575685925,
+    "true_rule": [
+      "A -> T : excitation",
+      "B -> T : inhibition",
+      "C and D -> T : excitation",
+      "C and G and H -> T : excitation",
+      "D and F and G -> T : inhibition",
+      "E and F -> T : inhibition"
+    ],
+    "matched_rule": [
+      "A -> T : excitation",
+      "B -> T : inhibition",
+      "C and D -> T : excitation",
+      "C and G and H -> T : excitation",
+      "D and F and G -> T : inhibition",
+      "E and F -> T : inhibition"
+    ],
+    "missing_rule": [],
+    "extra_rule": [],
+    "recall": 1.0,
+    "precision": 1.0,
+    "round_logs": [
+      {
+        "round": 1,
+        "exc_bic": 37676.99575685925,
+        "inh_bic": 37676.90668604164,
+        "exc_rules": 3,
+        "inh_rules": 3,
+        "exc_add_candidates": 476,
+        "inh_add_candidates": 0,
+        "exc_add_evals": 476,
+        "inh_add_evals": 0,
+        "exc_drop_evals": 3,
+        "inh_drop_evals": 3,
+        "exc_swap_evals": 2305,
+        "inh_swap_evals": 1550,
+        "exc_support_evals": 2785,
+        "inh_support_evals": 1554,
+        "changed": false
+      }
+    ]
+  }
+}
