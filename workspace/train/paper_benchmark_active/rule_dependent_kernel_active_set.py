@@ -41,6 +41,7 @@ from conjunctive_rule_initializer import (
     summarize_results,
     trapz_area_weights,
 )
+from runtime_resources import configure_runtime_resources
 
 
 @dataclass(frozen=True)
@@ -1088,12 +1089,14 @@ def main():
     ap.add_argument("--opt_steps", type=int, default=120)
     ap.add_argument("--lr", type=float, default=0.05)
     ap.add_argument("--device", default="auto")
+    ap.add_argument("--cpu_threads", type=int, default=0)
     ap.add_argument("--penalize_kernel_df", action="store_true")
     ap.add_argument("--family_attribution_passes", type=int, default=0)
     ap.add_argument("--post_prune_kernel_df", action="store_true")
     ap.add_argument("--post_prune_min_order", type=int, default=2)
     ap.add_argument("--post_prune_penalty_scale_grid", default="")
     args = ap.parse_args()
+    configure_runtime_resources(None if int(args.cpu_threads) <= 0 else int(args.cpu_threads))
 
     train, val, metadata = load_dataset(args.data)
     config = load_yaml(args.config)

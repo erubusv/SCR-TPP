@@ -2054,3 +2054,1554 @@ Current recommendation:
 - focus next on stronger **safe pruning / admissible upper bounds** for the
   swap neighborhood, since that is the most likely source of a step-change in
   runtime while keeping the method logically rigorous
+
+### 49. Real Rerun Of The Strict Exact-Block Solver On 2026-04-01
+
+We reran the stricter frozen-kernel exact block solver with actual benchmark
+execution again on `2026-04-01`, this time explicitly allowing full machine
+resources for this one experiment.
+
+Observed completed results from the rerun:
+- `paper_logical_shared`:
+  - elapsed `558.5s`
+  - recall `1.0`, precision `0.875`
+  - extra rule `ACD inh`
+- `paper_logical_context`:
+  - elapsed `996.6s`
+  - recall `1.0`, precision `0.778`
+  - extra rules `ABD inh`, `AEG exc`
+- `paper_logical_clean_plus`:
+  - elapsed `1414.3s`
+  - recall `1.0`, precision `0.857`
+  - extra rule `L exc`
+- `paper_kernel_robustness_triangular`:
+  - elapsed `638.1s`
+  - recall `1.0`, precision `1.0`
+  - no missing rules, no extra rules
+
+Critical hard-case rerun outcome:
+- `paper_num_predicates_30` did **not** complete successfully under the strict
+  exact-block solver
+  - GPU run failed with `CUDA out of memory`
+  - failure happened during the anchor active-set solve, before the final exact
+    support result was produced
+  - a follow-up CPU-only rerun stayed alive for more than `17` minutes while
+    consuming about `2000%` CPU, but still did not finish producing a result
+
+What this rerun establishes:
+- the completed cases match the earlier qualitative picture rather than
+  overturning it
+- this stricter exact `add/drop/swap` direction is still a valid rigorous
+  backbone
+- but it has **not** yet surpassed the earlier frozen-kernel exact
+  add-only correction in overall benchmark accuracy
+- and it still has a serious runtime / memory tail on the hardest
+  `20/30`-predicate-type cases
+
+Current best-performing method overall as of this note:
+- still the earlier **frozen-kernel exact add-only correction**
+- reason:
+  - it is still the only oracle-free path we tested that removed **all missing
+    rules** across the full official benchmark suite
+  - it achieved recall `1.0` on all `12/12` official benchmarks
+  - it was exact with precision `1.0` on:
+    - `kernel_triangular`
+    - `kernel_exponential`
+    - `num_predicates_10`
+    - `num_predicates_20`
+    - `ablation_excitation_only`
+  - its remaining problem is extra-rule over-admission, not missing true rules
+
+Current best rigorous symmetric-search direction:
+- the stricter frozen-kernel exact block solver with:
+  - warm-start-only family refine
+  - frozen kernels
+  - exact `add/drop/swap`
+  - stronger inhibition screening
+- reason:
+  - it is the cleanest path toward admissible bounds / certified pruning
+  - but at the moment it is still worse than the add-only correction in
+    end-to-end practical benchmark performance
+
+Working rule going forward:
+- every materially new experiment should be appended to this note
+- every such entry should explicitly state what the **current best-performing
+  method** is at that time
+- code paths that are experimentally dominated and no longer useful as either
+  baselines or active directions should be removed rather than left behind
+
+### 50. Speed Comparison On The Fastest Benchmark For Safe-Screen Exact Search
+
+We directly tested the "less heuristic but hopefully faster" variant on the
+fastest benchmark we have been using for exact-search speed checks:
+`paper_ablation_inhibition_only`.
+
+Resource policy used for this comparison:
+- CPU only
+- `12` threads (`OMP_NUM_THREADS=12`)
+- `CUDA_VISIBLE_DEVICES=0` set, but this specific script still ran on CPU
+- same local dataset reused for both runs
+
+Comparison setup:
+- baseline:
+  - current frozen-kernel exact add-only correction
+  - heuristic candidate filter (`rule_score` sign/gain)
+  - capped exact search with `max_add = 4`
+- variant:
+  - same anchor and same final refit
+  - root safe-screening using exact singleton gain on the frozen residual
+  - uncapped exact add-only search
+
+Observed result:
+- baseline (`tmp_exact_ablation_inhibition_only_compare_baseline.json`):
+  - elapsed `186.28s`
+  - candidate count `58`
+  - search nodes `13`
+  - screening `0.72s`
+  - search `15.41s`
+  - refit `4.42s`
+  - recall `1.0`, precision `0.857`
+- safe-screen + uncapped (`tmp_exact_ablation_inhibition_only_compare_safe_screen.json`):
+  - elapsed `208.92s`
+  - candidate count `58`
+  - search nodes `49`
+  - screening `4.19s`
+  - search `85.41s`
+  - refit `4.49s`
+  - recall `1.0`, precision `0.857`
+
+Interpretation:
+- on this fastest benchmark, the rigorous root safe-screen did **not** remove
+  any additional candidates beyond the existing heuristic filter
+- because the candidate count stayed at `58`, the uncapped search only opened
+  more nodes (`13 -> 49`) and paid a much larger search cost
+  (`15.41s -> 85.41s`)
+- end-to-end accuracy stayed exactly the same
+- therefore this particular "safe-screen + uncapped" replacement is
+  experimentally dominated on the fastest benchmark and should **not** remain
+  as an active code path
+
+Current best-performing method overall as of this note:
+- still the earlier **frozen-kernel exact add-only correction**
+- this speed comparison did not change that conclusion
+- on `paper_ablation_inhibition_only`, the baseline remained both faster and no
+  worse in recall/precision than the more rigorous candidate/search variant
+
+### 51. Decision After The Failed Root Safe-Screen Speed Comparison
+
+The latest speed comparison narrows the next research move substantially.
+
+What should be dropped:
+- do **not** continue the generic "root safe-screen + uncapped add-only exact
+  search" path
+- on the fastest benchmark it gave:
+  - no candidate reduction
+  - much larger search (`13 -> 49` nodes)
+  - worse wall time
+  - no accuracy gain
+
+What still looks viable:
+- keep the already validated exact-preserving systems speedups:
+  - parallel support solves
+  - batched screening
+  - moderate worker count (`~16` on the small benchmark)
+- shift the algorithmic focus away from root-level global candidate admission
+  and toward **smaller ambiguity neighborhoods**
+- inside those neighborhoods, focus on:
+  - stronger admissible upper bounds for `swap` branches
+  - tighter candidate pruning inside the block
+  - more selective ambiguity motifs instead of whole same-sign overlap
+    components
+
+Working interpretation:
+- the problem is not simply "heuristic filter vs safe filter"
+- the main cost comes from searching the wrong neighborhood too broadly
+- therefore the next serious direction is:
+  - selective ambiguity-block definition first
+  - then certified pruning / exact search inside that smaller block
+
+Current best-performing method overall remains:
+- **frozen-kernel exact add-only correction**
+
+### 64. Standalone Server-Migration Handoff Document Created
+
+Because the server became unstable, a standalone handoff document was created:
+
+- `train/research_docs/handoff_rule_dependent_kernel_research_2026-04-03.md`
+
+That document is intended to be sufficient on its own and includes:
+
+- current best-performing method overall:
+  - **frozen-kernel exact add-only correction**
+- the theorem-friendly line status
+- the latest confidence-set selection result
+- the `logical_clean_plus` audit
+- the recommended theorem framing
+- the exact last stopped task before migration
+
+Last stopped task recorded in the handoff:
+
+- the next requested run was to execute the current theorem-friendly method on
+  the benchmark suite
+- but with predicate variation changed so that we use `10/20` rather than
+  `20/30`, because `num_predicates_30` was too slow
+- before any edit or run, it was confirmed that the current suite definitions
+  in:
+  - `run_paper_benchmarks.py`
+  - `tmp_run_exact_correction_benchmarks.py`
+  - `tmp_run_frozen_block_exact_solver_benchmarks.py`
+  still contained `num_predicates_30`
+- no new full-suite run had started after that request
+
+Current best-performing method overall remains:
+- **frozen-kernel exact add-only correction**
+
+### 65. The Current "True Recovery Under Margin" Statement Is Too Weak To Be The Main Contribution
+
+Important correction after reflecting on the theorem target:
+
+The previously sketched theorem shape
+- truth in candidate family
+- exact support-fixed refits
+- uniform concentration over the family
+- positive population margin
+- surrogate alignment
+
+is **too assumption-heavy** to serve as the main scientific contribution.
+
+Why it is too weak as a main theorem:
+- `truth in family` already assumes away the hard candidate-generation problem
+- `positive population margin` is a standard identifiability assumption
+- `surrogate alignment` essentially assumes that the frozen-kernel criterion
+  already prefers the truth
+- taken together, these assumptions almost collapse the theorem into
+  "if the optimization target already favors the truth and the truth is in the
+  searched family, then the method recovers the truth"
+
+That statement is still valid as a corollary, but it is not strong enough to
+carry the paper.
+
+What should be the real contribution instead:
+
+1. **Certified family construction / no-materially-better-support exclusion**
+- prove that the safe block construction does not exclude any support whose
+  improvement over the incumbent exceeds an explicit threshold
+- this is algorithmic, data-dependent, and not merely an existential
+  assumption
+
+2. **Finite-sample oracle guarantee over the certified family**
+- main theorem should be an oracle inequality or confidence-set selection
+  guarantee relative to the best support in the constructed family
+- this avoids assuming the truth is already the optimizer of the surrogate
+
+3. **Exact recovery only as a corollary**
+- if the truth lies in the certified family and enjoys a sufficient margin, then
+  the oracle theorem implies exact recovery with high probability
+
+This is a much stronger framing because:
+- the main theorem is about what the algorithm itself guarantees
+- the recovery result becomes a standard consequence under additional
+  identifiability assumptions
+- the paper contribution then lives in:
+  - the certified family reduction
+  - the exact local search inside that family
+  - the confidence-aware familywise selection rule
+
+Recommended theorem stack:
+- Theorem A:
+  - safe/certified family construction
+- Theorem B:
+  - finite-sample oracle inequality for the final selected model over that
+    family
+- Corollary C:
+  - exact true-rule recovery under margin and family-containment assumptions
+
+Current best-performing method overall remains:
+- **frozen-kernel exact add-only correction**
+
+### 64. What Can Actually Be Proved About True-Rule Recovery In The Current Structure
+
+If the final scientific goal is:
+- "recover the true rule set with a mathematical confidence bound"
+
+then the current structure is **not** yet enough for an unconditional theorem,
+but it is already close enough for a **conditional high-probability recovery
+theorem**.
+
+Most realistic theorem shape in the current structure:
+- use the present pipeline only as:
+  - exact-search generator of a small ambiguity family
+  - plus confidence-set-restricted model selection on that family
+- then prove recovery of the true rule set **inside that family** under a small
+  number of explicit assumptions
+
+Minimal assumption set that looks sufficient:
+
+1. **Family containment**
+- the true support `S*` belongs to the final candidate family `F`
+- this is the most important assumption
+- without it, no familywise confidence bound can recover the truth
+
+2. **Support-fixed exactness**
+- for every candidate support `U in F`, the refit stage returns the global
+  optimum of the frozen-kernel support-fixed objective
+- in the current code this is already close to true, because the support-fixed
+  excitation/inhibition subproblems are convex
+
+3. **Uniform concentration on the validation criterion**
+- the empirical validation loss uniformly concentrates over the finite family
+  `F`
+- because `F` is small and fixed before the final confidence stage, a union
+  bound / empirical-Bernstein argument is feasible
+
+4. **Population margin / identifiability**
+- the true support is separated from every other support in `F`
+- e.g.
+  - for all `U != S*` in `F`,
+    `R(U) - R(S*) >= gamma > 0`
+- this is the usual recovery condition
+- without a positive margin, exact recovery cannot be guaranteed
+
+5. **Surrogate alignment**
+- the frozen-kernel population criterion ranks `S*` above the competing family
+  members
+- this is exactly the assumption that fails on the sticky `logical_clean_plus`
+  case
+- it is weaker than "the whole model is correctly specified", but stronger
+  than mere search correctness
+
+What this means in plain terms:
+- with assumptions `1–4`, we can prove recovery **relative to the frozen-kernel
+  target family**
+- to prove recovery of the actual true rules, we also need `5`
+- so the cleanest current theorem is:
+  - "if the truth is in the candidate family and the frozen-kernel population
+    criterion has a positive margin in favor of the truth, then the
+    confidence-set selector recovers the true support with probability
+    at least `1-delta`"
+
+So how many assumptions are really needed?
+- the answer is roughly **4 core assumptions + 1 alignment assumption**
+- equivalently:
+  - `4` if we define the target as the frozen-kernel population optimum
+  - `5` if we want to claim recovery of the actual true rule set
+
+Why this is scientifically useful:
+- it is already strong enough for a theorem section
+- it separates:
+  - search failure
+  - statistical selection failure
+  - surrogate-model mismatch
+- and it explains exactly why `logical_shared` can now be fixed while
+  `logical_clean_plus` still resists recovery
+
+Current best-performing method overall remains:
+- **frozen-kernel exact add-only correction**
+
+### 63. Historical Audit: `logical_clean_plus` Has Not Been 100/100 In The Current Saved Experimental Line
+
+After the latest confusion around `logical_clean_plus`, we audited the saved
+result files in `data/paper_suite`.
+
+Observed pattern across the current saved runs:
+- `swap_screen_logical_clean_plus.json`
+  - recall `1.0`, precision `0.857`
+  - extra `L -> T : excitation`
+- `tmp_exact_logical_clean_plus.json`
+  - recall `1.0`, precision `0.857`
+  - extra `L -> T : excitation`
+- `tmp_frozen_block_batch1.json`
+  - recall `1.0`, precision `0.857`
+  - extra `L -> T : excitation`
+- `tmp_safe_swap_suite_report.json`
+  - recall `1.0`, precision `0.857`
+  - extra `L -> T : excitation`
+- `tmp_safe_swap_plus_interaction_logical_pair.json`
+  - recall `1.0`, precision `0.857`
+  - extra `L -> T : excitation`
+- `tmp_safe_swap_conf_prune_screened_logical_pair.json`
+  - recall `1.0`, precision `0.857`
+  - extra `L -> T : excitation`
+- `tmp_safe_swap_budget_subset_logical_pair.json`
+  - recall `1.0`, precision `0.857`
+  - extra `L -> T : excitation`
+- `tmp_safe_swap_confset_select_logical_pair.json`
+  - recall `1.0`, precision `0.857`
+  - extra `L -> T : excitation`
+- only the old aggressive confidence-prune removed the extra, but it also
+  dropped the true rule `J and K and L -> T : inhibition`
+
+So, within the currently saved experiment line:
+- `logical_clean_plus` has been consistently **full-recall but one-extra**
+- not a repeatedly solved `100/100` case
+
+What this means scientifically:
+- the issue is not that a previously easy exact solution suddenly regressed
+- the issue is that the present frozen-kernel surrogate has a persistent local
+  ambiguity:
+  - true rule: `J and K and L -> T : inhibition`
+  - surrogate extra: `L -> T : excitation`
+- this ambiguity is stable across many different exact-search variants
+
+Why this particular extra is sticky:
+- `L` appears inside the true inhibitory triplet
+- under the frozen-kernel objective, a singleton positive effect on `L` remains
+  slightly useful even after the true triplet inhibition is present
+- therefore search is not the bottleneck here:
+  - the exact-search path already finds all true rules
+  - the final objective keeps assigning a small but nonzero advantage to the
+    extra singleton
+
+Evidence from the latest confidence-set model-selection run:
+- the extra-only candidate on `logical_clean_plus` was inside the confidence
+  set
+- but its split-A penalized score was still positive:
+  - total loss increase `7.14`
+  - penalty credit `5.58`
+  - final score `+1.56`
+- so under the current final criterion, the extra is still preferred to stay
+
+Bottom line:
+- `logical_clean_plus` is not currently failing because it became hard to
+  search
+- it is failing because the present frozen-kernel final objective still
+  prefers keeping `L -> T : excitation`
+
+Current best-performing method overall remains:
+- **frozen-kernel exact add-only correction**
+
+### 62. Confidence-Set-Restricted Model Selection Finally Removed The Extra On `logical_shared`, But Not On `logical_clean_plus`
+
+We then implemented the more faithful version of the proposed
+confidence-set-based final selection:
+
+- split A:
+  - rank active-rule ambiguity candidates
+  - build a fixed top-`k` ambiguity family (`k = 2`)
+  - use the exact-refit candidate's empirical penalized criterion on split A
+    for model selection
+- split B:
+  - use exact-refit lower confidence bounds to define the confidence set
+  - only candidates not significantly worse than the current support are
+    eligible
+- final selection:
+  - among confidence-set members, choose the candidate with the best
+    split-A penalized criterion
+
+This is different from the previous BIC-budgeted prune:
+- before:
+  - exact `UCB <= budget` was required for deletion
+- now:
+  - exact split-B confidence set only constrains admissible candidates
+  - split-A penalized empirical criterion performs the final ranking inside
+    that admissible set
+
+Actual run:
+- benchmarks:
+  - `logical_clean_plus`
+  - `logical_shared`
+- resources:
+  - all available machine resources
+  - `24` CPU threads
+  - `support_workers = 24`
+  - `device = auto`
+- output:
+  - `tmp_safe_swap_confset_select_logical_pair.json`
+
+Observed result on `logical_clean_plus`:
+- elapsed `862.96s`
+- recall `1.0`
+- precision `0.857`
+- extra remained:
+  - `L -> T : excitation`
+
+Why `logical_clean_plus` still did not prune:
+- the extra-only candidate was inside the confidence set
+- but its split-A penalized selection score was still positive:
+  - exact total diff on split A: `7.14`
+  - selection penalty: `5.58`
+  - final selection score: `+1.56`
+- so even inside the confidence set, the smaller support was not preferred
+
+Observed result on `logical_shared`:
+- elapsed `337.51s`
+- recall `1.0`
+- precision `1.0`
+- previous extra removed:
+  - `A and C and D -> T : inhibition`
+
+Why `logical_shared` did prune successfully:
+- the extra-only candidate was inside the confidence set
+- its split-A penalized selection score was negative:
+  - exact total diff on split A: `5.21`
+  - selection penalty: `5.60`
+  - final selection score: `-0.39`
+- the larger two-drop subset was not even in the confidence set
+  - its split-B lower confidence bound was positive
+
+Comparison against earlier variants:
+- `logical_clean_plus`
+  - 3-lever exact-search path:
+    - `1015.95s`
+    - recall `1.0`, precision `0.857`
+  - screened one-shot UCB prune:
+    - `960.67s`
+    - recall `1.0`, precision `0.857`
+  - confidence-set model selection:
+    - `862.96s`
+    - recall `1.0`, precision `0.857`
+- `logical_shared`
+  - 3-lever exact-search path:
+    - `492.54s`
+    - recall `1.0`, precision `0.875`
+  - aggressive old confidence-prune:
+    - `645.49s`
+    - recall `1.0`, precision `1.0`
+  - BIC-budgeted subset prune:
+    - `336.07s`
+    - recall `1.0`, precision `0.875`
+  - confidence-set model selection:
+    - `337.51s`
+    - recall `1.0`, precision `1.0`
+
+Interpretation:
+- this is the first mathematically structured final-selection rule in the
+  current line that:
+  - keeps recall
+  - removes the logical extra on `logical_shared`
+  - and does so without the earlier aggressive over-pruning
+- but it still fails on `logical_clean_plus`
+  - there, even the exact-refit extra-only candidate is still too expensive on
+    the selection split under the current frozen-kernel surrogate
+
+Meaning:
+- the remaining failure is now very specific
+  - not search
+  - not runtime
+  - not generic confidence-prune instability
+- it is a remaining criterion mismatch on `logical_clean_plus`
+
+Current best-performing method overall remains:
+- **frozen-kernel exact add-only correction**
+
+### 61. BIC-Budgeted Ambiguity-Subset Prune Preserved Recall And Improved Speed, But Still Did Not Remove The Logical Extras
+
+We implemented the more rigorous variant discussed after the confidence-prune
+analysis:
+- stage A:
+  - rank active rules by frozen-drop validation UCB on split A
+- stage B:
+  - take the top-`k` ambiguous rules (`k = 2`)
+  - enumerate all non-empty subsets of that fixed ambiguity set
+  - exact-refit each subset candidate
+  - accept a smaller support only if its exact one-sided UCB on split B is
+    below a BIC-derived budget
+    - `budget = |drop_set| * log(n_eff) / (2 n_eff)`
+
+This is stricter than the earlier aggressive prune:
+- fixed candidate family before the exact stage
+- simultaneous exact-stage testing over that finite family
+- nested-support budget derived directly from the BIC penalty scale
+
+Actual run:
+- benchmarks:
+  - `logical_clean_plus`
+  - `logical_shared`
+- resources:
+  - all available machine resources
+  - `24` CPU threads
+  - `support_workers = 24`
+  - `device = auto`
+- output:
+  - `tmp_safe_swap_budget_subset_logical_pair.json`
+
+Observed result on `logical_clean_plus`:
+- elapsed `863.52s`
+- recall `1.0`
+- precision `0.857`
+- extra remained:
+  - `L -> T : excitation`
+
+Observed exact-stage candidates on `logical_clean_plus`:
+- drop extra only:
+  - exact UCB `4.02e-4`
+  - budget `8.00e-5`
+- drop true inhibition only:
+  - exact UCB `2.48e-3`
+  - budget `8.00e-5`
+- drop both:
+  - exact UCB `2.54e-3`
+  - budget `1.60e-4`
+
+Observed result on `logical_shared`:
+- elapsed `336.07s`
+- recall `1.0`
+- precision `0.875`
+- extra remained:
+  - `A and C and D -> T : inhibition`
+
+Observed exact-stage candidates on `logical_shared`:
+- drop extra only:
+  - exact UCB `3.54e-4`
+  - budget `7.72e-5`
+- second inhibition candidate only:
+  - exact UCB `2.45e-3`
+  - budget `7.72e-5`
+- drop both:
+  - exact UCB `2.57e-3`
+  - budget `1.54e-4`
+
+Comparison against previous logical runs:
+- `logical_clean_plus`
+  - 3-lever exact-search path:
+    - `1015.95s`
+    - recall `1.0`, precision `0.857`
+  - screened one-shot UCB prune:
+    - `960.67s`
+    - recall `1.0`, precision `0.857`
+  - new BIC-budgeted subset prune:
+    - `863.52s`
+    - recall `1.0`, precision `0.857`
+- `logical_shared`
+  - 3-lever exact-search path:
+    - `492.54s`
+    - recall `1.0`, precision `0.875`
+  - screened one-shot UCB prune:
+    - `440.91s`
+    - recall `1.0`, precision `0.875`
+  - new BIC-budgeted subset prune:
+    - `336.07s`
+    - recall `1.0`, precision `0.875`
+
+Interpretation:
+- this variant does what the stricter theory predicts
+  - it does not over-prune
+  - it keeps recall on both logical benchmarks
+  - it is faster than the earlier logical confidence-prune variants
+- but the BIC-derived average-risk budget is much smaller than the exact UCB of
+  the observed extras
+- so the method is still too conservative to actually remove those extras
+
+Meaning:
+- the remaining precision problem is no longer a runtime issue
+- it is now a **criterion mismatch** issue:
+  - under the present frozen-kernel surrogate and strict BIC-derived budget,
+    the logical extras are not statistically cheap enough to prune
+- if we want a mathematically rigorous prune that actually removes them, the
+  next step is not "more search" but a different justified budget or a
+  different final objective
+
+Current best-performing method overall remains:
+- **frozen-kernel exact add-only correction**
+
+### 60. One-Shot Screened UCB Prune Was Faster And Safe On Recall, But Too Conservative To Remove The Extras
+
+We replaced the earlier aggressive multi-round confidence prune with a
+screened one-shot version:
+- stage A:
+  - evaluate all active rules by a cheap frozen-drop validation UCB
+  - keep only the single best candidate (`top_k = 1`)
+- stage B:
+  - run one exact leave-one-out refit only for that selected candidate
+  - drop it only if the one-sided exact UCB satisfies `UCB <= 0`
+
+This removes the earlier wrong monotonicity and cuts the exact-prune cost
+substantially.
+
+Actual run:
+- benchmarks:
+  - `logical_clean_plus`
+  - `logical_shared`
+- resources:
+  - CPU only
+  - `12` threads / `support_workers = 12`
+- output:
+  - `tmp_safe_swap_conf_prune_screened_logical_pair.json`
+
+Observed result on `logical_clean_plus`:
+- elapsed `960.67s`
+- recall `1.0`
+- precision `0.857`
+- extra remained:
+  - `L -> T : excitation`
+
+Observed prune behavior on `logical_clean_plus`:
+- screen stage correctly ranked the excitation extra first
+  - frozen-drop UCB `6.60e-4`
+- exact stage tested only that one candidate
+  - exact mean diff `7.92e-5`
+  - exact radius `2.66e-4`
+  - exact UCB `3.45e-4`
+- since `UCB > 0`, the rule was not dropped
+
+Observed result on `logical_shared`:
+- elapsed `440.91s`
+- recall `1.0`
+- precision `0.875`
+- extra remained:
+  - `A and C and D -> T : inhibition`
+
+Observed prune behavior on `logical_shared`:
+- screen stage correctly ranked the inhibition extra first
+  - frozen-drop UCB `3.57e-4`
+- exact stage tested only that one candidate
+  - exact mean diff `8.15e-5`
+  - exact radius `2.12e-4`
+  - exact UCB `2.93e-4`
+- again `UCB > 0`, so the rule was not dropped
+
+Comparison against previous variants:
+- `logical_clean_plus`
+  - 3-lever exact-search path:
+    - `1015.95s`
+    - recall `1.0`, precision `0.857`
+  - aggressive old confidence-prune:
+    - `1112.71s`
+    - recall `0.833`, precision `1.0`
+  - new screened one-shot UCB prune:
+    - `960.67s`
+    - recall `1.0`, precision `0.857`
+- `logical_shared`
+  - 3-lever exact-search path:
+    - `492.54s`
+    - recall `1.0`, precision `0.875`
+  - aggressive old confidence-prune:
+    - `645.49s`
+    - recall `1.0`, precision `1.0`
+  - new screened one-shot UCB prune:
+    - `440.91s`
+    - recall `1.0`, precision `0.875`
+
+Interpretation:
+- the new screened UCB prune does exactly what it should mathematically:
+  - it no longer over-prunes
+  - it preserves recall on both logical benchmarks
+  - it is much faster than the earlier exact-all-rules prune
+- but with strict `epsilon = 0`, it is too conservative to actually remove the
+  weak extra rules on these two datasets
+
+Meaning:
+- the speed problem of confidence pruning is largely solved by screening
+- the remaining issue is now the statistical decision threshold, not runtime
+- the next rigorous variant should be an explicit `epsilon`-noninferiority
+  prune rather than strict `UCB <= 0`
+
+Current best-performing method overall remains:
+- **frozen-kernel exact add-only correction**
+
+### 59. Predicted Speedup From A Rigorous Two-Stage Confidence Prune
+
+No new run was made here. This is a runtime forecast based on the completed
+`logical_clean_plus` and `logical_shared` confidence-prune runs.
+
+Observed current costs:
+- `logical_clean_plus`
+  - 3-lever exact-search path without confidence prune:
+    - `1015.95s`
+  - current confidence-prune path:
+    - `1112.71s`
+  - observed prune overhead:
+    - about `96.76s`
+  - tested leave-one-out deletions:
+    - `18`
+- `logical_shared`
+  - 3-lever exact-search path without confidence prune:
+    - `492.54s`
+  - current confidence-prune path:
+    - `645.49s`
+  - observed prune overhead:
+    - about `152.95s`
+  - tested leave-one-out deletions:
+    - `15`
+
+Forecast if we switch to:
+- cheap fixed-candidate frozen-drop UCB screening
+- exact refit only for ambiguous survivors
+- same exact search path as before
+
+Expected prune-stage reduction:
+- likely from `15–18` exact deletion tests down to about `2–4`
+- expected prune-stage speedup:
+  - about `3x–6x`
+
+Forecasted total wall time:
+- `logical_clean_plus`
+  - expected total:
+    - roughly `1035s – 1065s`
+  - relative to current confidence-prune:
+    - about `1.04x – 1.08x` faster
+  - relative to the no-prune 3-lever path:
+    - still probably slightly slower unless the prune exact solves are also
+      accelerated
+- `logical_shared`
+  - expected total:
+    - roughly `515s – 555s`
+  - relative to current confidence-prune:
+    - about `1.16x – 1.25x` faster
+  - still likely a bit slower than the no-prune 3-lever path
+
+Forecast if we also add exact Newton / factor reuse inside support solves:
+- each exact support solve may plausibly get another `1.5x – 2.5x` speedup on
+  these small-support problems
+- then the combined total-wall-time forecast becomes:
+  - `logical_clean_plus`
+    - roughly `820s – 980s`
+  - `logical_shared`
+    - roughly `390s – 500s`
+
+Main takeaway:
+- redesigning prune alone helps, but not dramatically on benchmarks where the
+  search phase already dominates total runtime
+- the larger win needs:
+  - cheap UCB screening to avoid most exact prune refits
+  - exact Newton / low-rank reuse to shrink the remaining solve cost
+
+Current best-performing method overall remains:
+- **frozen-kernel exact add-only correction**
+
+### 58. Exact-Preserving Speedups Should Target The Prune Design, Not Just More Threads
+
+After examining the current confidence-prune implementation, the runtime
+problem is structural.
+
+Why the current prune is slow:
+- `confidence_calibrated_exact_prune` loops over every active rule and tests
+  leave-one-out deletion one by one
+- each tested deletion calls `refit_fixed_support_pair`
+- `refit_fixed_support_pair(cycles=2)` performs:
+  - one excitation solve
+  - one inhibition solve
+  - two more alternating excitation/inhibition cycles
+  - one final excitation solve
+- so each tested deletion costs **7 convex support solves**
+
+Implication on the logical runs:
+- `logical_clean_plus`
+  - prune tested `7 + 6 + 5 = 18` deletions
+  - this means about `18 * 7 = 126` support solves inside prune alone
+- `logical_shared`
+  - prune tested `8 + 7 = 15` deletions
+  - this means about `15 * 7 = 105` support solves inside prune alone
+
+Therefore the main speed issue is not lack of CPU threads by itself.
+The main issue is:
+- too many expensive exact re-solves are being used just to decide whether a
+  single rule is dispensable
+
+Rigor-preserving acceleration route:
+
+1. **Use a fixed-candidate confidence screen before exact refits**
+- build a fixed candidate family from the already trained support
+- for each active rule `j`, define a cheap "frozen-drop" candidate by setting
+  only coefficient `j` to zero and leaving all other trained parameters fixed
+- these candidates are fixed before holdout evaluation, so a one-sided
+  validation-risk UCB test on this family is clean
+- cost:
+  - only `O(|S| * n_val)` loss evaluations
+  - no optimization loop per candidate
+
+2. **Exact-refit only the ambiguous rules**
+- after the cheap UCB screen, most rules should fall into:
+  - definitely keep
+  - definitely droppable within `epsilon`
+- only the narrow ambiguous middle set needs expensive exact leave-one-out
+  refits
+- runtime then changes from roughly
+  - `O(|S| * C_fit)`
+  to
+  - `O(|S| * n_val + |A_amb| * C_fit)`
+  where `|A_amb| << |S|`
+
+3. **If full finite-sample validity is required after adaptive screening,
+   use a second calibration split**
+- split the old validation/holdout part into:
+  - calibration A for cheap frozen-drop screening
+  - calibration B for final exact-refit prune on the ambiguous survivors
+- this avoids adaptive reuse of the same holdout in both stages
+
+4. **Inside each exact support solve, replace L-BFGS-B with exact Hessian
+   Newton / Cholesky updates**
+- both excitation and inhibition support-fixed problems are convex
+- their Hessians are available in closed form
+- support sizes are small, so Newton with line search should converge in a few
+  steps and preserve the same optimum/KKT target
+- for swap/drop neighbors, use superset block matrices and low-rank factor
+  updates instead of rebuilding support matrices from scratch every time
+
+Bottom line:
+- the right way to speed this path up while keeping mathematical rigor is
+  **not** "run the same prune with more hardware"
+- it is:
+  - cheap fixed-candidate UCB screening first
+  - exact refits only for ambiguous survivors
+  - exact Newton / factor reuse inside the remaining convex solves
+
+Current best-performing method overall remains:
+- **frozen-kernel exact add-only correction**
+
+### 57. The First Confidence-Prune Rule Was Statistically The Wrong Monotone Direction
+
+After inspecting the implemented confidence gate, the main issue is now clear.
+
+Implemented rule:
+- for rule drop candidate `j`, let
+  - `Delta_j = R(S \ {j}) - R(S)` be the population validation-risk increase
+    from dropping the rule
+  - `hat Delta_j` be its empirical estimate
+  - `r_j` be the empirical-Bernstein radius
+- the code dropped `j` whenever
+  - `hat Delta_j <= r_j`
+
+Why this is not a safe pruning rule:
+- if the concentration statement is
+  - `|Delta_j - hat Delta_j| <= r_j`
+  then `hat Delta_j <= r_j` only implies
+  - `Delta_j <= hat Delta_j + r_j <= 2 r_j`
+- this does **not** certify `Delta_j <= 0`
+- it only says the true loss increase might still be positive, as large as
+  roughly `2 r_j`
+
+This creates the wrong monotonicity:
+- smaller sample size or smaller `delta` makes `r_j` larger
+- under the implemented rule, larger uncertainty makes pruning **easier**
+- that is the opposite of what a conservative safe-pruning rule should do
+
+What happened on the two logical benchmarks:
+- `logical_clean_plus`
+  - true inhibition rule `J and K and L -> T : inhibition`
+  - `hat Delta = 8.48e-4`
+  - `r = 1.04e-3`
+  - implemented rule dropped it because `hat Delta <= r`
+  - but the valid upper bound is
+    - `UCB = hat Delta + r = 1.89e-3 > 0`
+  - so there was **no** rigorous basis to certify the rule as dispensable
+- `logical_shared`
+  - extra inhibition rule `A and C and D -> T : inhibition`
+  - `hat Delta = 7.34e-5`
+  - `r = 1.75e-4`
+  - `UCB = 2.48e-4`
+  - this is much smaller, so this rule really does look much easier to prune
+
+What the mathematically correct safe-prune form should be:
+- if the goal is exact `0`-excess-risk safe pruning, drop only when
+  - `hat Delta_j + r_j <= 0`
+- if the goal is `epsilon`-noninferiority pruning, drop only when
+  - `hat Delta_j + r_j <= epsilon`
+- this has the correct monotonicity:
+  - larger uncertainty makes pruning harder, not easier
+
+Implication for the current pair:
+- the current rule was indeed **too aggressive** in the only sense that matters
+  for safe pruning
+- more precisely:
+  - it treated "failure to prove necessity" as if it were
+    "proof of dispensability"
+- the correct rigorous interpretation is:
+  - dropping is justified only by a one-sided upper confidence bound on the
+    excess loss of the smaller support
+
+Additional rigor caveat:
+- even after fixing the sign of the test, a full theorem still needs
+  - correction across adaptive prune rounds, not just within-round Bonferroni
+  - a dependence-aware concentration argument for validation losses if the
+    holdout contributions are not i.i.d.
+
+Most useful next step:
+- replace the current rule with `UCB <= epsilon` pruning
+- choose `epsilon` explicitly as the allowable excess validation risk
+- then the method gives a clean finite-sample noninferiority statement instead
+  of the current overly aggressive elimination rule
+
+Current best-performing method overall remains:
+- **frozen-kernel exact add-only correction**
+
+### 56. Confidence-Calibrated Exact Prune Fixed `logical_shared` But Broke Recall On `logical_clean_plus`
+
+We implemented a post-selection `confidence-calibrated exact prune` on top of
+the current theorem-friendly exact-search path:
+- exact block solver with frozen kernel
+- excitation safe swap superset
+- active interaction block
+- scalar warm reuse
+- then an exact leave-one-rule-out refit with an empirical-Bernstein
+  confidence gate on validation loss difference
+
+Rule-retention test:
+- for current support `S` and one-rule-smaller support `S \ {j}`,
+  keep rule `j` only if the empirical validation loss increase is larger than
+  the confidence radius
+- otherwise drop it
+
+Actual run:
+- benchmarks:
+  - `logical_clean_plus`
+  - `logical_shared`
+- resources:
+  - CPU only
+  - `support_workers = 16`
+  - unrestricted machine resources were allowed for this run
+- output:
+  - `tmp_safe_swap_conf_prune_logical_pair.json`
+
+Observed result on `logical_clean_plus`:
+- elapsed `1112.71s`
+- recall `0.833`
+- precision `1.0`
+- dropped the true rule `J and K and L -> T : inhibition`
+- removed the previous extra `L -> T : excitation`
+
+Comparison on `logical_clean_plus`:
+- earlier safe-block baseline:
+  - `1147.41s`
+  - recall `1.0`, precision `0.857`
+- earlier 3-lever speed variant:
+  - `1015.95s`
+  - recall `1.0`, precision `0.857`
+- new confidence-prune variant:
+  - `1112.71s`
+  - recall `0.833`, precision `1.0`
+
+Observed result on `logical_shared`:
+- elapsed `645.49s`
+- recall `1.0`
+- precision `1.0`
+- removed the previous extra `A and C and D -> T : inhibition`
+
+Comparison on `logical_shared`:
+- earlier safe-block baseline:
+  - `495.66s`
+  - recall `1.0`, precision `0.875`
+- earlier 3-lever speed variant:
+  - `492.54s`
+  - recall `1.0`, precision `0.875`
+- new confidence-prune variant:
+  - `645.49s`
+  - recall `1.0`, precision `1.0`
+
+What the prune logs say:
+- `logical_shared` behaved as intended
+  - exactly one inhibition rule was judged statistically droppable in prune
+    round 1
+  - after removing it, no more rules passed the confidence gate
+- `logical_clean_plus` did not behave as intended
+  - prune round 1 judged two rules droppable:
+    - one excitation extra
+    - one inhibition rule
+  - prune round 2 still judged that inhibition rule droppable
+  - that inhibition rule was the true `J and K and L -> T : inhibition`
+
+Interpretation:
+- the confidence gate is **not yet safe enough** as currently instantiated
+- it can improve precision on some ambiguity cases, but on
+  `logical_clean_plus` it over-pruned a true inhibitory rule under the frozen
+  surrogate objective
+- this is therefore **not** ready to become the default final-selection rule
+- the current failure mode is consistent with the main concern:
+  - the validation-loss confidence test is still tied to the frozen-kernel
+    surrogate, so statistical non-separation does not imply structural
+    dispensability of the rule
+
+Decision:
+- keep this as an experimental branch only
+- do not make confidence-pruned selection the default path yet
+
+Current best-performing method overall remains:
+- **frozen-kernel exact add-only correction**
+
+### 57. Full-Suite Run Of The Provable Safe-Superset Restricted Local-Swap Variant: 11/12 Completed, Hardest Case Still Failed
+
+On `2026-04-01` we ran the theorem-friendly variant discussed above:
+- inhibition side uses the safe inactive-superset screen
+- neighborhood stays `restricted local swap`
+- support-fixed solves remain exact
+- fast path is still exact-preserving:
+  - all-core CPU execution
+  - parallel support solves
+  - no approximate pruning
+
+Primary result files:
+- `tmp_safe_swap_full_suite.json`
+- `tmp_safe_swap_ablation_batch_rerun.json`
+- consolidated report: `tmp_safe_swap_suite_report.json`
+
+Resource settings actually used:
+- full-suite pass for the first `8` benchmarks:
+  - CPU only
+  - `OMP_NUM_THREADS=24`
+  - `support_workers=16`
+- `num_predicates_30` retries:
+  - `support_workers=16`, then `8`, then `4`
+  - all three runs died before writing a benchmark result
+- final ablation batch:
+  - CPU only
+  - `OMP_NUM_THREADS=24`
+  - `support_workers=16`
+
+Completed benchmark results:
+- `logical_clean_plus`
+  - `1147.4s`
+  - recall `1.0`
+  - precision `0.857`
+  - extra: `L -> T : excitation`
+- `logical_shared`
+  - `495.7s`
+  - recall `1.0`
+  - precision `0.875`
+  - extra: `A and C and D -> T : inhibition`
+- `logical_context`
+  - `569.8s`
+  - recall `1.0`
+  - precision `0.700`
+  - extras:
+    - `A and B and D -> T : inhibition`
+    - `A and E and G -> T : excitation`
+    - `E and G -> T : inhibition`
+- `kernel_triangular`
+  - `419.6s`
+  - recall `1.0`
+  - precision `1.0`
+- `kernel_exponential`
+  - `369.5s`
+  - recall `1.0`
+  - precision `1.0`
+- `kernel_gaussian`
+  - `1737.8s`
+  - recall `1.0`
+  - precision `0.667`
+  - extras:
+    - `A and B -> T : inhibition`
+    - `B and C and D -> T : inhibition`
+    - `G and H -> T : inhibition`
+- `num_predicates_10`
+  - `745.3s`
+  - recall `1.0`
+  - precision `1.0`
+- `num_predicates_20`
+  - `1890.5s`
+  - recall `1.0`
+  - precision `1.0`
+- `ablation_excitation_only`
+  - `996.2s`
+  - recall `1.0`
+  - precision `1.0`
+- `ablation_inhibition_only`
+  - `236.9s`
+  - recall `1.0`
+  - precision `1.0`
+- `ablation_mixed_sign`
+  - `685.8s`
+  - recall `1.0`
+  - precision `1.0`
+
+`num_predicates_30` outcome:
+- not completed
+- the process died before JSON write in all three attempts:
+  - `support_workers=16`
+  - `support_workers=8`
+  - `support_workers=4`
+- practical interpretation:
+  - the current provable safe-superset restricted local-swap path still has a
+    severe memory / runtime tail on the hardest benchmark
+
+Aggregate picture over the completed `11` benchmarks:
+- recall stayed `1.0` on all completed runs
+- exact `100/100` recovery on `7/11`
+  - `kernel_triangular`
+  - `kernel_exponential`
+  - `num_predicates_10`
+  - `num_predicates_20`
+  - `ablation_excitation_only`
+  - `ablation_inhibition_only`
+  - `ablation_mixed_sign`
+- average precision over the completed set: `0.918`
+- total wall time over the completed set: `9294.5s` (`~154.9 min`)
+
+Main conclusion:
+- this theorem-friendly variant is **not** yet a replacement for the current
+  best empirical method
+- it does show that the safe-superset / restricted-swap idea can recover the
+  truth exactly on many benchmarks
+- but it is still too expensive, and its precision is clearly worse on
+  `logical_clean_plus`, `logical_shared`, `logical_context`, and
+  `kernel_gaussian`
+- most importantly, it is still not practical on `num_predicates_30`
+
+Current best-performing method overall remains:
+- **frozen-kernel exact add-only correction**
+- reason:
+  - it is still the only method verified end-to-end on the full official
+    `12/12` suite with recall `1.0`
+
+Updated judgment on the provable direction:
+- scientifically useful as a theorem-oriented reference point
+- not yet a competitive end-to-end solver
+- next bottlenecks are now obvious:
+  - excitation-side global swap cost
+  - memory growth on `num_predicates_30`
+  - precision failure on ambiguity-heavy logical and gaussian cases
+
+### 58. Adding All Three Practical Levers Reduced Some Search Cost, But Did Not Remove The Logical Extras
+
+We then applied the three concrete levers discussed after the full-suite run:
+- add an excitation-side safe swap superset
+- add an interaction-based active drop block
+- reuse scalar screening optima as child warm starts
+
+Implementation summary:
+- new excitation exact singleton screening / safe superset
+- active interaction block for both excitation and inhibition
+- scalar warm reuse for both excitation and inhibition swap children
+- all changes stayed exact-preserving at the support-fixed solve level
+
+Target benchmarks:
+- `logical_clean_plus`
+- `logical_shared`
+
+Run settings:
+- CPU only
+- `OMP_NUM_THREADS=24`
+- `support_workers=16`
+- flags:
+  - `--inh_safe_swap_superset`
+  - `--exc_safe_swap_superset`
+  - `--active_interaction_block`
+  - `--scalar_warm_reuse`
+  - `--inh_block_swap_only`
+- output:
+  - `tmp_safe_swap_plus_interaction_logical_pair.json`
+
+Baseline comparison source:
+- the earlier theorem-friendly safe-superset run from
+  `tmp_safe_swap_suite_report.json`
+
+Observed result on `logical_clean_plus`:
+- baseline:
+  - `1147.4s`
+  - recall `1.0`
+  - precision `0.857`
+  - extra: `L -> T : excitation`
+  - round-1 excitation stats:
+    - add candidates `203`
+    - swap evals `1128`
+    - support evals `1336`
+- new 3-lever run:
+  - `1015.9s`
+  - recall `1.0`
+  - precision `0.857`
+  - extra still `L -> T : excitation`
+  - round-1 excitation stats:
+    - safe superset candidates `291`
+    - interaction drop candidates `4`
+    - add candidates `5`
+    - swap evals `850`
+    - support evals `860`
+
+Observed result on `logical_shared`:
+- baseline:
+  - `495.7s`
+  - recall `1.0`
+  - precision `0.875`
+  - extra: `A and C and D -> T : inhibition`
+  - round-1 excitation stats:
+    - add candidates `3`
+    - swap evals `95`
+    - support evals `103`
+- new 3-lever run:
+  - `492.5s`
+  - recall `1.0`
+  - precision `0.875`
+  - extra still `A and C and D -> T : inhibition`
+  - round-1 excitation stats:
+    - safe superset candidates `33`
+    - interaction drop candidates `4`
+    - add candidates `2`
+    - swap evals `79`
+    - support evals `86`
+
+Interpretation:
+- the excitation safe screen and scalar warm reuse did lower some local search
+  cost
+- the effect was real on `logical_clean_plus`
+  - wall time down by about `11%`
+  - excitation support evaluations down from `1336` to `860`
+- the effect was much smaller on `logical_shared`
+  - wall time changed only marginally
+- most importantly:
+  - **the extras did not disappear in either benchmark**
+
+Why these three levers were not enough:
+- the excitation safe superset was still too loose in `logical_clean_plus`
+  - `291` excitation-safe candidates remained
+- the interaction block did not materially shrink the active excitation side in
+  either case
+  - interaction drop candidates stayed `4`
+- the surrogate extra rules are still locally admissible under the frozen-kernel
+  `BIC` objective, so better screening alone is not enough to force them out
+
+Practical conclusion:
+- these three levers are worth keeping as optional speed-oriented knobs
+- but they are **not** the missing fix for the logical precision failures
+- the next precision-focused step must attack the objective / ambiguity itself,
+  not just the local search mechanics
+
+Current best-performing method overall remains:
+- **frozen-kernel exact add-only correction**
+
+### 56. Swap-Evaluation Speed Bottleneck: GPU Alone Is Not The Main Idea
+
+The current exact-support-search implementation spends most of its heavy local
+search time in repeated support-fixed solves, especially for swap evaluation in
+the strict exact-block solver.
+
+Important implementation fact:
+- the present support-fixed exact solves are NumPy/SciPy CPU solves, not tensor
+  GPU solves
+- so simply turning on GPU does not accelerate the current swap path
+
+What looks genuinely promising:
+- **batched exact screening**
+  - already validated as useful on CPU
+  - should also transfer naturally to GPU if needed
+- **batched support-fixed swap solves**
+  - many swap candidates share the same dropped-parent support and differ by
+    only one added rule
+  - this structure should allow:
+    - batched gradient/Hessian construction
+    - batched small dense linear solves
+- **rank-1 / low-rank updates**
+  - likely even more important than GPU
+  - for swap candidates, the Hessian and feature matrix differ by one column, so
+    Cholesky or Woodbury-style updates may avoid solving each support from
+    scratch
+- **hybrid execution**
+  - use GPU for screening and batched tensor algebra
+  - use exact CPU solves only for a small finalist set if needed
+
+What is less promising:
+- naive GPU migration of the current SciPy-per-support loop
+- this would keep the same algorithmic structure and therefore preserve most of
+  the Python / per-support overhead
+
+Current best-performing method overall remains:
+- **frozen-kernel exact add-only correction**
+
+### 52. Candidate-Centered Inhibition Motif Block Was A Real Win On The Fastest Benchmark
+
+After dropping the failed root-level safe-screen idea, we tried a much more
+selective local neighborhood on the fastest benchmark
+`paper_ablation_inhibition_only`.
+
+New variant:
+- keep the same frozen-kernel exact block backbone
+- keep the same support-fixed exact inhibition refits
+- but replace the global inhibition `drop/swap` neighborhood with a tiny
+  candidate-centered motif block
+- center ranking:
+  - inactive inhibition candidates ranked by how many current active inhibition
+    rules support them as strict containers or one-edit same-order neighbors
+- neighborhood:
+  - keep only the top `6` centers with support count at least `2`
+  - only active inhibition rules touched by those centers can be reconsidered
+  - only swaps inside that motif block are allowed
+  - no global pure-drop move outside the block
+
+Actual run on `2026-04-01`:
+- benchmark: `paper_ablation_inhibition_only`
+- resources:
+  - CPU only
+  - `12` threads
+  - `support_workers = 12`
+- output: `tmp_block_motif_ablation_inhibition_only.json`
+
+Observed result:
+- elapsed `100.22s`
+- recall `1.0`
+- precision `1.0`
+- no missing rules
+- no extra rules
+
+Round-1 neighborhood statistics:
+- inhibition block centers: `6`
+- inhibition drop candidates actually evaluated: `4`
+- inhibition add candidates after block restriction: `0`
+- inhibition swap evaluations: `5`
+- inhibition support evaluations: `10`
+- solver stopped after round 1 with no further change
+
+Comparison against earlier strict exact-support-search results on the same
+benchmark:
+- older exact `add/drop` block prototype:
+  - `222.6s`
+  - recall `0.833`, precision `1.0`
+- older exact `add/drop/swap` prototype:
+  - `452.8s`
+  - recall `0.833`, precision `1.0`
+- best later exact-preserving speed setting we had recorded:
+  - `319.9s`
+  - recall `0.833`, precision `1.0`
+- new candidate-centered motif block:
+  - `100.2s`
+  - recall `1.0`, precision `1.0`
+
+Interpretation:
+- this is the first concrete evidence in the current codebase that **smaller
+  ambiguity neighborhoods** can improve both accuracy and runtime at once
+- the win came from changing *which* local neighborhood is searched, not from
+  a broader global safe-screen
+- on this benchmark, the motif block prevented the harmful global drop that had
+  been removing `CGH inh`, while also collapsing the swap search cost
+
+Current best-performing method overall as of this note:
+- still **frozen-kernel exact add-only correction** across the full official
+  benchmark suite
+- reason:
+  - it is still the only method verified end-to-end on all `12/12` official
+    benchmarks with recall `1.0`
+
+Current most promising next exact-search direction:
+- candidate-centered ambiguity blocks with exact local swap search
+- reason:
+  - unlike the failed root safe-screen idea, this one already produced a real
+    speed and accuracy gain in an actual benchmark run
+
+### 53. Block-Global Certificate Search Inside The Motif Was Slower And Worse On The Fastest Benchmark
+
+We then tested the more certificate-oriented variant on the same benchmark
+`paper_ablation_inhibition_only`.
+
+Variant:
+- keep the same candidate-centered inhibition motif block definition
+- but instead of local `swap` search, enumerate **all subsets** inside that
+  block exactly
+- outside-block inhibition rules stay fixed
+- this gives a valid certificate only for the chosen motif block, not for the
+  full library
+
+Actual run:
+- benchmark: `paper_ablation_inhibition_only`
+- resources:
+  - CPU only
+  - `12` threads
+  - `support_workers = 12`
+- output: `tmp_block_motif_exact_cert_ablation_inhibition_only.json`
+
+Observed result:
+- elapsed `646.11s`
+- recall `0.833`
+- precision `1.0`
+- still missed `CGH inh`
+- no extra rules
+
+Block-search statistics:
+- round 1:
+  - inhibition block universe size `10`
+  - exact subsets evaluated `1024`
+  - inhibition support solves `1024`
+- round 2:
+  - inhibition block universe size `9`
+  - exact subsets evaluated `512`
+  - inhibition support solves `512`
+
+Interpretation:
+- exact subset enumeration inside the motif block was **not** a good practical
+  move on this benchmark
+- it was much slower than the motif `swap-only` version (`646.1s` vs `100.2s`)
+- and it was also worse in accuracy, because the block-global `BIC` optimum
+  inside that heuristic block preferred dropping `CGH inh`
+- so this confirms an important point:
+  - a certificate on the wrong block is not enough
+  - the useful improvement came from the selective motif neighborhood plus the
+    restricted local move set, not from exhaustive subset search inside the
+    block
+
+Decision:
+- do **not** keep the exact-subset motif-certificate path as an active code path
+- keep the simpler candidate-centered local swap motif version instead
+
+Current best-performing method overall remains:
+- **frozen-kernel exact add-only correction**
+
+Current best exact-search direction remains:
+- candidate-centered ambiguity blocks with restricted exact local swap search
+
+### 55. A Theorem-Friendly Safe Block Construction Looks Plausible, But It Must Replace The Current Top-K Center Heuristic
+
+The current candidate-centered motif rule itself is still heuristic and should
+not be the direct theorem target.
+
+A more promising provable block-selection route is:
+- define an inactive safe superset using exact singleton-gain upper bounds
+- then define the active part of the block as the interaction component touched
+  by that inactive safe set
+
+Why the inactive side looks provable:
+- in the frozen-kernel inhibition objective, the benefit of adding a set of
+  inactive rules is subadditive because
+  - `1 - exp(-(u+v)) <= (1 - exp(-u)) + (1 - exp(-v))`
+- therefore the exact gain of any inactive set can be upper-bounded by the sum
+  of exact singleton gains at the current residual
+- this means a candidate family can be safely excluded if the total remaining
+  singleton-gain upper bound is below the incumbent improvement gap
+
+Why the active side may also be made provable:
+- if an active rule has zero or sufficiently small interaction with every
+  candidate in the inactive safe set, then swapping it with those candidates
+  cannot materially improve the objective
+- under an exact separability condition, only the connected interaction
+  component needs to be searched
+- under an approximate separability condition, the same statement may hold with
+  an explicit error bound
+
+Practical implication:
+- the theorem target should not be the present support-count / top-K center
+  ranking
+- instead it should be:
+  - safe inactive superset by exact gain bounds
+  - safe active ambiguity component by interaction graph
+  - exact search only inside that certified superset block
+
+Current best-performing method overall remains:
+- **frozen-kernel exact add-only correction**
+
+### 54. What Looks Provable From The Current Motif-Block Direction
+
+After the latest motif-block experiments, the theorem-friendly parts are now
+clearer.
+
+Most promising to make provable:
+- **recoverability condition**
+  - this is the strongest candidate for a real theorem
+  - likely form:
+    - assume the true support differs from the current support only inside a
+      localized ambiguity block
+    - assume every outside-block inactive rule has non-positive reduced cost or
+      a valid safe upper bound below the incumbent gap
+    - assume a positive margin in penalized population risk between the true
+      block support and every other block support
+    - then certified search inside that block recovers the true support
+- **restricted swap**
+  - this looks provable only under a structural condition
+  - likely form:
+    - if the truth can be reached from the current support by exchanging one
+      ambiguous proxy block with one truth block, and every improving move is
+      representable by those swaps, then swap-restricted local search is
+      sufficient
+  - so this is probably a conditional theorem, not a universal one
+
+Only partially promising:
+- **block selection**
+  - the current candidate-centered ranking itself is still heuristic
+  - proving the exact current scoring rule is probably not the right target
+  - the more realistic theorem path is:
+    - define a larger safe superset block by reduced-cost / KKT screening
+    - then prove the true ambiguity set is contained in that block
+  - so the provable object is likely a **safe block construction**, not the
+    current heuristic top-K center ranking
+
+Bottom-line assessment:
+- best theorem target: `recoverability condition`
+- second-best theorem target: `restricted swap under localized ambiguity`
+- weakest current theorem target: the exact current `block selection` heuristic
+
+Current best-performing method overall remains:
+- **frozen-kernel exact add-only correction**

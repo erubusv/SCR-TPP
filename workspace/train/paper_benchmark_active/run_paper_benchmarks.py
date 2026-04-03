@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import pickle
 from pathlib import Path
 
@@ -10,6 +12,7 @@ import yaml
 
 from data.synthetic import create_rules_from_config, generate_exp_data
 import rule_dependent_kernel_active_set as rd
+from runtime_resources import configure_runtime_resources, default_cpu_threads
 
 
 ROOT = Path("/workspace")
@@ -18,18 +21,18 @@ RESULTS_PATH = PAPER_SUITE / "paper_benchmark_results.json"
 
 
 BENCHMARKS = [
-    {"name": "logical_clean_plus", "config": PAPER_SUITE / "paper_logical_clean_plus.yaml", "gpu": "cuda:0"},
-    {"name": "logical_shared", "config": PAPER_SUITE / "paper_logical_shared.yaml", "gpu": "cuda:1"},
-    {"name": "logical_context", "config": PAPER_SUITE / "paper_logical_context.yaml", "gpu": "cuda:0"},
-    {"name": "kernel_triangular", "config": PAPER_SUITE / "paper_kernel_robustness_triangular.yaml", "gpu": "cuda:1"},
-    {"name": "kernel_exponential", "config": PAPER_SUITE / "paper_kernel_robustness_exponential.yaml", "gpu": "cuda:0"},
-    {"name": "kernel_gaussian", "config": PAPER_SUITE / "paper_kernel_robustness_gaussian.yaml", "gpu": "cuda:1"},
-    {"name": "num_predicates_10", "config": PAPER_SUITE / "paper_num_predicates_10.yaml", "gpu": "cuda:0"},
-    {"name": "num_predicates_20", "config": PAPER_SUITE / "paper_num_predicates_20.yaml", "gpu": "cuda:1"},
-    {"name": "num_predicates_30", "config": PAPER_SUITE / "paper_num_predicates_30.yaml", "gpu": "cuda:0"},
-    {"name": "ablation_excitation_only", "config": PAPER_SUITE / "paper_ablation_excitation_only.yaml", "gpu": "cuda:1"},
-    {"name": "ablation_inhibition_only", "config": PAPER_SUITE / "paper_ablation_inhibition_only.yaml", "gpu": "cuda:0"},
-    {"name": "ablation_mixed_sign", "config": PAPER_SUITE / "paper_ablation_mixed_sign.yaml", "gpu": "cuda:1"},
+    {"name": "logical_clean_plus", "config": PAPER_SUITE / "paper_logical_clean_plus.yaml"},
+    {"name": "logical_shared", "config": PAPER_SUITE / "paper_logical_shared.yaml"},
+    {"name": "logical_context", "config": PAPER_SUITE / "paper_logical_context.yaml"},
+    {"name": "kernel_triangular", "config": PAPER_SUITE / "paper_kernel_robustness_triangular.yaml"},
+    {"name": "kernel_exponential", "config": PAPER_SUITE / "paper_kernel_robustness_exponential.yaml"},
+    {"name": "kernel_gaussian", "config": PAPER_SUITE / "paper_kernel_robustness_gaussian.yaml"},
+    {"name": "num_predicates_10", "config": PAPER_SUITE / "paper_num_predicates_10.yaml"},
+    {"name": "num_predicates_20", "config": PAPER_SUITE / "paper_num_predicates_20.yaml"},
+    {"name": "num_predicates_30", "config": PAPER_SUITE / "paper_num_predicates_30.yaml"},
+    {"name": "ablation_excitation_only", "config": PAPER_SUITE / "paper_ablation_excitation_only.yaml"},
+    {"name": "ablation_inhibition_only", "config": PAPER_SUITE / "paper_ablation_inhibition_only.yaml"},
+    {"name": "ablation_mixed_sign", "config": PAPER_SUITE / "paper_ablation_mixed_sign.yaml"},
 ]
 
 
@@ -235,12 +238,46 @@ def evaluate_config(
     }
 
 
+def parse_name_filter(spec: str) -> set[str]:
+    return {part.strip() for part in str(spec).split(",") if part.strip()}
+
+
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--device", default=os.environ.get("BENCHMARK_DEVICE", "cuda:0"))
+    ap.add_argument("--cpu_threads", type=int, default=0)
+    ap.add_argument("--only", default="")
+    ap.add_argument("--reuse_dataset", action="store_true")
+    args = ap.parse_args()
+
+    cpu_threads = configure_runtime_resources(None if int(args.cpu_threads) <= 0 else int(args.cpu_threads))
+    requested = parse_name_filter(args.only)
+    benchmarks = BENCHMARKS
+    if requested:
+        benchmarks = [item for item in BENCHMARKS if item["name"] in requested]
+        missing = sorted(requested - {item["name"] for item in benchmarks})
+        if missing:
+            raise ValueError(f"unknown benchmark names: {missing}")
+
+    print(
+        json.dumps(
+            {
+                "cpu_threads": int(cpu_threads),
+                "default_cpu_threads": int(default_cpu_threads()),
+                "device": str(args.device),
+                "reuse_dataset": bool(args.reuse_dataset),
+                "benchmarks": [item["name"] for item in benchmarks],
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
+
     out = {}
-    for item in BENCHMARKS:
+    for item in benchmarks:
         name = item["name"]
         print("RUNNING", name, flush=True)
-        out[name] = evaluate_config(item["config"], item["gpu"])
+        out[name] = evaluate_config(item["config"], str(args.device), regenerate_dataset=not bool(args.reuse_dataset))
         print(json.dumps({name: out[name]}, indent=2), flush=True)
         RESULTS_PATH.write_text(json.dumps(out, indent=2))
     print("WROTE", RESULTS_PATH)

@@ -1,0 +1,57 @@
+{
+  "ablation_inhibition_only": {
+    "name": "ablation_inhibition_only",
+    "config_path": "/workspace/data/paper_suite/paper_ablation_inhibition_only.yaml",
+    "elapsed_sec": 183.0715470314026,
+    "anchor_bic": 14684.705028797487,
+    "bic": 14684.438454212275,
+    "inh_block_center_top_k": 0,
+    "inh_block_center_min_support": 2,
+    "inh_block_swap_only": true,
+    "inh_safe_swap_superset": true,
+    "true_rule": [
+      "A -> T : inhibition",
+      "B -> T : inhibition",
+      "C and D -> T : inhibition",
+      "C and G and H -> T : inhibition",
+      "D and F and G -> T : inhibition",
+      "E and F -> T : inhibition"
+    ],
+    "matched_rule": [
+      "A -> T : inhibition",
+      "B -> T : inhibition",
+      "C and D -> T : inhibition",
+      "C and G and H -> T : inhibition",
+      "D and F and G -> T : inhibition",
+      "E and F -> T : inhibition"
+    ],
+    "missing_rule": [],
+    "extra_rule": [],
+    "recall": 1.0,
+    "precision": 1.0,
+    "round_logs": [
+      {
+        "round": 1,
+        "exc_bic": 14684.438454212275,
+        "inh_bic": 14684.447813254115,
+        "exc_rules": 0,
+        "inh_rules": 6,
+        "exc_add_candidates": 62,
+        "inh_safe_superset_candidates": 86,
+        "inh_add_candidates": 1,
+        "inh_block_centers": 0,
+        "inh_block_drop_candidates": 6,
+        "inh_block_universe_rules": 0,
+        "exc_add_evals": 62,
+        "inh_add_evals": 1,
+        "exc_drop_evals": 0,
+        "inh_drop_evals": 6,
+        "exc_swap_evals": 0,
+        "inh_swap_evals": 182,
+        "exc_support_evals": 63,
+        "inh_support_evals": 190,
+        "changed": false
+      }
+    ]
+  }
+}

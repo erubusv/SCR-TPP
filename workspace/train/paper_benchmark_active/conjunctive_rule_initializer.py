@@ -373,6 +373,54 @@ def compute_source_signal_matrix(
     return z
 
 
+def compute_source_basis_matrix(
+    seq_arrays: list[dict[int, np.ndarray]],
+    *,
+    source: int,
+    knots: np.ndarray,
+    seq_ids: np.ndarray,
+    times: np.ndarray,
+) -> np.ndarray:
+    knots = np.asarray(knots, dtype=np.float64)
+    out = np.zeros((len(times), len(knots)), dtype=np.float64)
+    if len(times) == 0:
+        return out
+    if knots.ndim != 1 or knots.size < 2:
+        raise ValueError("compute_source_basis_matrix expects at least two knots")
+
+    order = np.argsort(seq_ids, kind="stable")
+    seq_ids_sorted = seq_ids[order]
+    uniq, starts = np.unique(seq_ids_sorted, return_index=True)
+    ends = np.r_[starts[1:], len(order)]
+    delta = np.diff(knots)
+
+    for seq_idx, st, en in zip(uniq.tolist(), starts.tolist(), ends.tolist()):
+        idxs = order[st:en]
+        q = times[idxs]
+        src_events = seq_arrays[int(seq_idx)].get(int(source), np.zeros((0,), dtype=np.float64))
+        if src_events.size == 0:
+            continue
+        prefix = np.empty((src_events.size + 1,), dtype=np.float64)
+        prefix[0] = 0.0
+        np.cumsum(src_events, out=prefix[1:])
+        block = np.zeros((len(q), len(knots)), dtype=np.float64)
+        for j, (left_dt, right_dt) in enumerate(zip(knots[:-1], knots[1:])):
+            high = np.searchsorted(src_events, q - float(left_dt), side="left")
+            low = np.searchsorted(src_events, q - float(right_dt), side="left")
+            count = high - low
+            active = count > 0
+            if not np.any(active):
+                continue
+            count_f = count[active].astype(np.float64, copy=False)
+            sum_times = prefix[high[active]] - prefix[low[active]]
+            dt_sum = count_f * q[active] - sum_times
+            inv_delta = 1.0 / max(float(delta[j]), 1e-12)
+            block[active, j] += (float(right_dt) * count_f - dt_sum) * inv_delta
+            block[active, j + 1] += (dt_sum - float(left_dt) * count_f) * inv_delta
+        out[idxs] = np.maximum(block, 0.0)
+    return out
+
+
 def bounded_source_activity(z: np.ndarray) -> np.ndarray:
     return 1.0 - np.exp(-np.maximum(z, 0.0))
 
@@ -439,49 +487,35 @@ class SourceBasisCache:
         hit = self.cache.get(key)
         if hit is not None:
             return hit
-        mats_tr_ev: list[np.ndarray] = []
-        mats_tr_gr: list[np.ndarray] = []
-        mats_va_ev: list[np.ndarray] = []
-        mats_va_gr: list[np.ndarray] = []
-        for basis_idx in range(self.knots.size):
-            ker = basis_kernel(self.knots, basis_idx)
-            tr_ev = compute_source_signal_matrix(
+        out = (
+            compute_source_basis_matrix(
                 self.train_arrays,
-                {key: ker},
-                source_ids=(key,),
+                source=key,
+                knots=self.knots,
                 seq_ids=self.train_event_seq_ids,
                 times=self.train_event_times,
-            )[:, 0]
-            tr_gr = compute_source_signal_matrix(
+            ),
+            compute_source_basis_matrix(
                 self.train_arrays,
-                {key: ker},
-                source_ids=(key,),
+                source=key,
+                knots=self.knots,
                 seq_ids=self.train_grid_seq_ids,
                 times=self.train_grid_times,
-            )[:, 0]
-            va_ev = compute_source_signal_matrix(
+            ),
+            compute_source_basis_matrix(
                 self.val_arrays,
-                {key: ker},
-                source_ids=(key,),
+                source=key,
+                knots=self.knots,
                 seq_ids=self.val_event_seq_ids,
                 times=self.val_event_times,
-            )[:, 0]
-            va_gr = compute_source_signal_matrix(
+            ),
+            compute_source_basis_matrix(
                 self.val_arrays,
-                {key: ker},
-                source_ids=(key,),
+                source=key,
+                knots=self.knots,
                 seq_ids=self.val_grid_seq_ids,
                 times=self.val_grid_times,
-            )[:, 0]
-            mats_tr_ev.append(tr_ev)
-            mats_tr_gr.append(tr_gr)
-            mats_va_ev.append(va_ev)
-            mats_va_gr.append(va_gr)
-        out = (
-            np.column_stack(mats_tr_ev),
-            np.column_stack(mats_tr_gr),
-            np.column_stack(mats_va_ev),
-            np.column_stack(mats_va_gr),
+            ),
         )
         self.cache[key] = out
         return out

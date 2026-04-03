@@ -1,0 +1,45 @@
+{
+  "ablation_inhibition_only": {
+    "name": "ablation_inhibition_only",
+    "config_path": "/workspace/data/paper_suite/paper_ablation_inhibition_only.yaml",
+    "elapsed_sec": 186.27633428573608,
+    "anchor_bic": 14913.681522238969,
+    "bic": 14701.1893967507,
+    "correction_accepted": true,
+    "candidate_strategy": "heuristic",
+    "uncapped_search": false,
+    "candidate_count": 58,
+    "search_nodes": 13,
+    "screening_sec": 0.7217151522636414,
+    "search_sec": 15.410256462171674,
+    "refit_sec": 4.419808445498347,
+    "selected_additions": [
+      "A and E and F -> T : inhibition",
+      "C and G and H -> T : inhibition",
+      "D and F and G -> T : inhibition",
+      "E and F -> T : inhibition"
+    ],
+    "true_rule": [
+      "A -> T : inhibition",
+      "B -> T : inhibition",
+      "C and D -> T : inhibition",
+      "C and G and H -> T : inhibition",
+      "D and F and G -> T : inhibition",
+      "E and F -> T : inhibition"
+    ],
+    "matched_rule": [
+      "A -> T : inhibition",
+      "B -> T : inhibition",
+      "C and D -> T : inhibition",
+      "C and G and H -> T : inhibition",
+      "D and F and G -> T : inhibition",
+      "E and F -> T : inhibition"
+    ],
+    "missing_rule": [],
+    "extra_rule": [
+      "A and E and F -> T : inhibition"
+    ],
+    "recall": 1.0,
+    "precision": 0.8571428571428571
+  }
+}

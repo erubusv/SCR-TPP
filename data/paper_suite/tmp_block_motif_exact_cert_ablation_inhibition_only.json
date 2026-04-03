@@ -1,0 +1,81 @@
+{
+  "ablation_inhibition_only": {
+    "name": "ablation_inhibition_only",
+    "config_path": "/workspace/data/paper_suite/paper_ablation_inhibition_only.yaml",
+    "elapsed_sec": 646.1064729690552,
+    "anchor_bic": 14684.704052234987,
+    "bic": 14684.15238257455,
+    "inh_block_center_top_k": 6,
+    "inh_block_center_min_support": 2,
+    "inh_block_swap_only": false,
+    "inh_block_exact_subsets": true,
+    "inh_block_exact_max_rules": 12,
+    "true_rule": [
+      "A -> T : inhibition",
+      "B -> T : inhibition",
+      "C and D -> T : inhibition",
+      "C and G and H -> T : inhibition",
+      "D and F and G -> T : inhibition",
+      "E and F -> T : inhibition"
+    ],
+    "matched_rule": [
+      "A -> T : inhibition",
+      "B -> T : inhibition",
+      "C and D -> T : inhibition",
+      "D and F and G -> T : inhibition",
+      "E and F -> T : inhibition"
+    ],
+    "missing_rule": [
+      "C and G and H -> T : inhibition"
+    ],
+    "extra_rule": [],
+    "recall": 0.8333333333333334,
+    "precision": 1.0,
+    "round_logs": [
+      {
+        "round": 1,
+        "exc_bic": 14684.152382045135,
+        "inh_bic": 14683.528267867025,
+        "exc_rules": 0,
+        "inh_rules": 5,
+        "exc_add_candidates": 62,
+        "inh_add_candidates": 0,
+        "inh_block_centers": 6,
+        "inh_block_drop_candidates": 4,
+        "inh_block_universe_rules": 10,
+        "inh_block_exact_subsets": 1024,
+        "exc_add_evals": 62,
+        "inh_add_evals": 0,
+        "exc_drop_evals": 0,
+        "inh_drop_evals": 0,
+        "exc_swap_evals": 0,
+        "inh_swap_evals": 0,
+        "exc_support_evals": 63,
+        "inh_support_evals": 1024,
+        "changed": true
+      },
+      {
+        "round": 2,
+        "exc_bic": 14684.15238257455,
+        "inh_bic": 14683.528267867025,
+        "exc_rules": 0,
+        "inh_rules": 5,
+        "exc_add_candidates": 42,
+        "inh_add_candidates": 0,
+        "inh_block_centers": 6,
+        "inh_block_drop_candidates": 3,
+        "inh_block_universe_rules": 9,
+        "inh_block_exact_subsets": 512,
+        "exc_add_evals": 42,
+        "inh_add_evals": 0,
+        "exc_drop_evals": 0,
+        "inh_drop_evals": 0,
+        "exc_swap_evals": 0,
+        "inh_swap_evals": 0,
+        "exc_support_evals": 43,
+        "inh_support_evals": 512,
+        "changed": false
+      }
+    ]
+  }
+}

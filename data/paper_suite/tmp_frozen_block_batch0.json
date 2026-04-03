@@ -1,0 +1,159 @@
+{
+  "logical_shared": {
+    "name": "logical_shared",
+    "config_path": "/workspace/data/paper_suite/paper_logical_shared.yaml",
+    "elapsed_sec": 558.5028717517853,
+    "anchor_bic": 73262.92270410628,
+    "bic": 73248.92393991366,
+    "true_rule": [
+      "A -> T : inhibition",
+      "A and B -> T : excitation",
+      "B and E and F -> T : inhibition",
+      "C -> T : excitation",
+      "C and D -> T : inhibition",
+      "D -> T : excitation",
+      "E and F -> T : excitation"
+    ],
+    "matched_rule": [
+      "A -> T : inhibition",
+      "A and B -> T : excitation",
+      "B and E and F -> T : inhibition",
+      "C -> T : excitation",
+      "C and D -> T : inhibition",
+      "D -> T : excitation",
+      "E and F -> T : excitation"
+    ],
+    "missing_rule": [],
+    "extra_rule": [
+      "A and C and D -> T : inhibition"
+    ],
+    "recall": 1.0,
+    "precision": 0.875,
+    "round_logs": [
+      {
+        "round": 1,
+        "exc_bic": 73248.92393991366,
+        "inh_bic": 73247.13521870779,
+        "exc_rules": 4,
+        "inh_rules": 4,
+        "exc_add_candidates": 3,
+        "inh_add_candidates": 1,
+        "exc_add_evals": 3,
+        "inh_add_evals": 1,
+        "exc_drop_evals": 4,
+        "inh_drop_evals": 4,
+        "exc_swap_evals": 95,
+        "inh_swap_evals": 83,
+        "exc_support_evals": 103,
+        "inh_support_evals": 89,
+        "changed": false
+      }
+    ]
+  },
+  "logical_context": {
+    "name": "logical_context",
+    "config_path": "/workspace/data/paper_suite/paper_logical_context.yaml",
+    "elapsed_sec": 996.6461079120636,
+    "anchor_bic": 46385.286813850944,
+    "bic": 46354.947092533424,
+    "true_rule": [
+      "A -> T : excitation",
+      "A and C and D -> T : inhibition",
+      "B -> T : inhibition",
+      "B and C and D -> T : excitation",
+      "E -> T : inhibition",
+      "E and F -> T : excitation",
+      "E and F and G -> T : inhibition"
+    ],
+    "matched_rule": [
+      "A -> T : excitation",
+      "A and C and D -> T : inhibition",
+      "B -> T : inhibition",
+      "B and C and D -> T : excitation",
+      "E -> T : inhibition",
+      "E and F -> T : excitation",
+      "E and F and G -> T : inhibition"
+    ],
+    "missing_rule": [],
+    "extra_rule": [
+      "A and B and D -> T : inhibition",
+      "A and E and G -> T : excitation"
+    ],
+    "recall": 1.0,
+    "precision": 0.7777777777777778,
+    "round_logs": [
+      {
+        "round": 1,
+        "exc_bic": 46358.15470776031,
+        "inh_bic": 46359.106916124576,
+        "exc_rules": 4,
+        "inh_rules": 5,
+        "exc_add_candidates": 0,
+        "inh_add_candidates": 1,
+        "exc_add_evals": 0,
+        "inh_add_evals": 1,
+        "exc_drop_evals": 4,
+        "inh_drop_evals": 6,
+        "exc_swap_evals": 107,
+        "inh_swap_evals": 119,
+        "exc_support_evals": 112,
+        "inh_support_evals": 127,
+        "changed": true
+      },
+      {
+        "round": 2,
+        "exc_bic": 46355.18731779592,
+        "inh_bic": 46358.787974477025,
+        "exc_rules": 4,
+        "inh_rules": 4,
+        "exc_add_candidates": 0,
+        "inh_add_candidates": 2,
+        "exc_add_evals": 0,
+        "inh_add_evals": 2,
+        "exc_drop_evals": 4,
+        "inh_drop_evals": 5,
+        "exc_swap_evals": 108,
+        "inh_swap_evals": 126,
+        "exc_support_evals": 113,
+        "inh_support_evals": 134,
+        "changed": true
+      },
+      {
+        "round": 3,
+        "exc_bic": 46356.68005035327,
+        "inh_bic": 46356.67552961675,
+        "exc_rules": 4,
+        "inh_rules": 5,
+        "exc_add_candidates": 0,
+        "inh_add_candidates": 3,
+        "exc_add_evals": 0,
+        "inh_add_evals": 3,
+        "exc_drop_evals": 4,
+        "inh_drop_evals": 4,
+        "exc_swap_evals": 111,
+        "inh_swap_evals": 146,
+        "exc_support_evals": 116,
+        "inh_support_evals": 154,
+        "changed": true
+      },
+      {
+        "round": 4,
+        "exc_bic": 46354.947092533424,
+        "inh_bic": 46356.67552961675,
+        "exc_rules": 4,
+        "inh_rules": 5,
+        "exc_add_candidates": 0,
+        "inh_add_candidates": 1,
+        "exc_add_evals": 0,
+        "inh_add_evals": 1,
+        "exc_drop_evals": 4,
+        "inh_drop_evals": 5,
+        "exc_swap_evals": 109,
+        "inh_swap_evals": 129,
+        "exc_support_evals": 114,
+        "inh_support_evals": 136,
+        "changed": false
+      }
+    ]
+  }
+}

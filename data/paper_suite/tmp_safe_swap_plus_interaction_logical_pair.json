@@ -1,0 +1,130 @@
+{
+  "logical_clean_plus": {
+    "name": "logical_clean_plus",
+    "config_path": "/workspace/data/paper_suite/paper_logical_clean_plus.yaml",
+    "elapsed_sec": 1015.9475538730621,
+    "anchor_bic": 46463.42591765035,
+    "bic": 46463.36350231803,
+    "inh_block_center_top_k": 0,
+    "inh_block_center_min_support": 2,
+    "inh_block_swap_only": true,
+    "inh_safe_swap_superset": true,
+    "exc_safe_swap_superset": true,
+    "active_interaction_block": true,
+    "scalar_warm_reuse": true,
+    "true_rule": [
+      "A -> T : excitation",
+      "B -> T : inhibition",
+      "C and D -> T : excitation",
+      "E and F -> T : inhibition",
+      "G and H and I -> T : excitation",
+      "J and K and L -> T : inhibition"
+    ],
+    "matched_rule": [
+      "A -> T : excitation",
+      "B -> T : inhibition",
+      "C and D -> T : excitation",
+      "E and F -> T : inhibition",
+      "G and H and I -> T : excitation",
+      "J and K and L -> T : inhibition"
+    ],
+    "missing_rule": [],
+    "extra_rule": [
+      "L -> T : excitation"
+    ],
+    "recall": 1.0,
+    "precision": 0.8571428571428571,
+    "round_logs": [
+      {
+        "round": 1,
+        "exc_bic": 46463.36350231803,
+        "inh_bic": 46463.5227274764,
+        "exc_rules": 4,
+        "inh_rules": 3,
+        "exc_safe_superset_candidates": 291,
+        "exc_interaction_drop_candidates": 4,
+        "exc_add_candidates": 5,
+        "inh_safe_superset_candidates": 291,
+        "inh_interaction_drop_candidates": 3,
+        "inh_add_candidates": 0,
+        "inh_block_centers": 0,
+        "inh_block_drop_candidates": 3,
+        "inh_block_universe_rules": 0,
+        "exc_add_evals": 5,
+        "inh_add_evals": 0,
+        "exc_drop_evals": 4,
+        "inh_drop_evals": 3,
+        "exc_swap_evals": 850,
+        "inh_swap_evals": 691,
+        "exc_support_evals": 860,
+        "inh_support_evals": 695,
+        "changed": false
+      }
+    ]
+  },
+  "logical_shared": {
+    "name": "logical_shared",
+    "config_path": "/workspace/data/paper_suite/paper_logical_shared.yaml",
+    "elapsed_sec": 492.5413477420807,
+    "anchor_bic": 73259.54770410628,
+    "bic": 73246.54587136672,
+    "inh_block_center_top_k": 0,
+    "inh_block_center_min_support": 2,
+    "inh_block_swap_only": true,
+    "inh_safe_swap_superset": true,
+    "exc_safe_swap_superset": true,
+    "active_interaction_block": true,
+    "scalar_warm_reuse": true,
+    "true_rule": [
+      "A -> T : inhibition",
+      "A and B -> T : excitation",
+      "B and E and F -> T : inhibition",
+      "C -> T : excitation",
+      "C and D -> T : inhibition",
+      "D -> T : excitation",
+      "E and F -> T : excitation"
+    ],
+    "matched_rule": [
+      "A -> T : inhibition",
+      "A and B -> T : excitation",
+      "B and E and F -> T : inhibition",
+      "C -> T : excitation",
+      "C and D -> T : inhibition",
+      "D -> T : excitation",
+      "E and F -> T : excitation"
+    ],
+    "missing_rule": [],
+    "extra_rule": [
+      "A and C and D -> T : inhibition"
+    ],
+    "recall": 1.0,
+    "precision": 0.875,
+    "round_logs": [
+      {
+        "round": 1,
+        "exc_bic": 73246.54587136672,
+        "inh_bic": 73244.54017830493,
+        "exc_rules": 4,
+        "inh_rules": 4,
+        "exc_safe_superset_candidates": 33,
+        "exc_interaction_drop_candidates": 4,
+        "exc_add_candidates": 2,
+        "inh_safe_superset_candidates": 33,
+        "inh_interaction_drop_candidates": 4,
+        "inh_add_candidates": 1,
+        "inh_block_centers": 0,
+        "inh_block_drop_candidates": 4,
+        "inh_block_universe_rules": 0,
+        "exc_add_evals": 2,
+        "inh_add_evals": 1,
+        "exc_drop_evals": 4,
+        "inh_drop_evals": 4,
+        "exc_swap_evals": 79,
+        "inh_swap_evals": 82,
+        "exc_support_evals": 86,
+        "inh_support_evals": 88,
+        "changed": false
+      }
+    ]
+  }
+}
