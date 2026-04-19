@@ -24,9 +24,9 @@ Keep the current exact `shared/context` full suites, and add a new paper-only
 `clean+` suite that also contains a triplet inhibition rule.
 
 Configs:
-- [paper_logical_clean_plus.yaml](/workspace/data/paper_suite/paper_logical_clean_plus.yaml)
-- [paper_logical_shared.yaml](/workspace/data/paper_suite/paper_logical_shared.yaml)
-- [paper_logical_context.yaml](/workspace/data/paper_suite/paper_logical_context.yaml)
+- [logical_clean_plus.yaml](/home/yangmg1216/hnstpp/data/paper_suite/configs/final_logical_tpp/logical_clean_plus.yaml)
+- [logical_shared.yaml](/home/yangmg1216/hnstpp/data/paper_suite/configs/final_logical_tpp/logical_shared.yaml)
+- [logical_context.yaml](/home/yangmg1216/hnstpp/data/paper_suite/configs/final_logical_tpp/logical_context.yaml)
 
 Ground-truth rules:
 - `clean+`
@@ -117,9 +117,9 @@ Evaluation:
   - effective-support error
 
 Configs:
-- [paper_kernel_robustness_triangular.yaml](/workspace/data/paper_suite/paper_kernel_robustness_triangular.yaml)
-- [paper_kernel_robustness_exponential.yaml](/workspace/data/paper_suite/paper_kernel_robustness_exponential.yaml)
-- [paper_kernel_robustness_gaussian.yaml](/workspace/data/paper_suite/paper_kernel_robustness_gaussian.yaml)
+- [kernel_triangular.yaml](/home/yangmg1216/hnstpp/data/paper_suite/configs/final_logical_tpp/kernel_triangular.yaml)
+- [kernel_exponential.yaml](/home/yangmg1216/hnstpp/data/paper_suite/configs/final_logical_tpp/kernel_exponential.yaml)
+- [kernel_gaussian.yaml](/home/yangmg1216/hnstpp/data/paper_suite/configs/final_logical_tpp/kernel_gaussian.yaml)
 
 ## 3. Robustness To Number Of Predicates
 
@@ -175,9 +175,12 @@ So this experiment measures:
   weaker as the predicate vocabulary expands
 
 Configs:
-- [paper_num_predicates_10.yaml](/workspace/data/paper_suite/paper_num_predicates_10.yaml)
-- [paper_num_predicates_20.yaml](/workspace/data/paper_suite/paper_num_predicates_20.yaml)
-- [paper_num_predicates_30.yaml](/workspace/data/paper_suite/paper_num_predicates_30.yaml)
+- [num_predicates_10.yaml](/home/yangmg1216/hnstpp/data/paper_suite/configs/final_logical_tpp/num_predicates_10.yaml)
+- [num_predicates_20.yaml](/home/yangmg1216/hnstpp/data/paper_suite/configs/final_logical_tpp/num_predicates_20.yaml)
+
+Note:
+- `num_predicates_30` was part of the original plan but is not materialized in
+  the current final canonical suite.
 
 Role in paper:
 - this is the clean “dimension scaling under fixed event budget” experiment
@@ -218,9 +221,9 @@ Use one fixed logical topology and create three formal settings:
 - mixed-sign
 
 Recommended configs:
-- [paper_ablation_excitation_only.yaml](/workspace/data/paper_suite/paper_ablation_excitation_only.yaml)
-- [paper_ablation_inhibition_only.yaml](/workspace/data/paper_suite/paper_ablation_inhibition_only.yaml)
-- [paper_ablation_mixed_sign.yaml](/workspace/data/paper_suite/paper_ablation_mixed_sign.yaml)
+- [ablation_excitation_only.yaml](/home/yangmg1216/hnstpp/data/paper_suite/configs/final_logical_tpp/ablation_excitation_only.yaml)
+- [ablation_inhibition_only.yaml](/home/yangmg1216/hnstpp/data/paper_suite/configs/final_logical_tpp/ablation_inhibition_only.yaml)
+- [ablation_mixed_sign.yaml](/home/yangmg1216/hnstpp/data/paper_suite/configs/final_logical_tpp/ablation_mixed_sign.yaml)
 
 Use the same condition sets in all three:
 - `A`

@@ -1,0 +1,147 @@
+seed: 111
+time_horizon: 120.0
+num_event_types: 20
+num_samples: 5000
+max_len: 256
+activation_mode: product_bounded
+kernel: triangular
+base_intensity:
+  0: 0.1154260089
+  1: 0.1154260089
+  2: 0.1090134529
+  3: 0.1090134529
+  4: 0.1090134529
+  5: 0.1026008969
+  6: 0.1026008969
+  7: 0.1026008969
+  8: 0.0513004484
+  9: 0.0513004484
+  10: 0.0513004484
+  11: 0.0513004484
+  12: 0.0513004484
+  13: 0.0513004484
+  14: 0.0513004484
+  15: 0.0513004484
+  16: 0.0513004484
+  17: 0.0513004484
+  18: 0.0513004484
+  19: 0.18
+rules:
+- id: 0
+  target: 19
+  W_pos: 2.2
+  W_neg: 0.0
+  condition:
+    0:
+      peaks:
+      - 0.8
+      widths:
+      - 2.4
+      mix_weights:
+      - 1.0
+- id: 1
+  target: 19
+  W_pos: 0.0
+  W_neg: 2.2
+  condition:
+    1:
+      peaks:
+      - 0.8
+      widths:
+      - 2.4
+      mix_weights:
+      - 1.0
+- id: 2
+  target: 19
+  W_pos: 3.2
+  W_neg: 0.0
+  condition:
+    2:
+      peaks:
+      - 1.0
+      widths:
+      - 3.2
+      mix_weights:
+      - 1.0
+    3:
+      peaks:
+      - 1.0
+      widths:
+      - 3.2
+      mix_weights:
+      - 1.0
+- id: 3
+  target: 19
+  W_pos: 0.0
+  W_neg: 3.2
+  condition:
+    4:
+      peaks:
+      - 1.0
+      widths:
+      - 3.2
+      mix_weights:
+      - 1.0
+    5:
+      peaks:
+      - 1.0
+      widths:
+      - 3.2
+      mix_weights:
+      - 1.0
+- id: 4
+  target: 19
+  W_pos: 3.8
+  W_neg: 0.0
+  condition:
+    2:
+      peaks:
+      - 1.2
+      widths:
+      - 4.0
+      mix_weights:
+      - 1.0
+    6:
+      peaks:
+      - 1.2
+      widths:
+      - 4.0
+      mix_weights:
+      - 1.0
+    7:
+      peaks:
+      - 1.2
+      widths:
+      - 4.0
+      mix_weights:
+      - 1.0
+- id: 5
+  target: 19
+  W_pos: 0.0
+  W_neg: 3.6
+  condition:
+    3:
+      peaks:
+      - 1.2
+      widths:
+      - 4.0
+      mix_weights:
+      - 1.0
+    5:
+      peaks:
+      - 1.2
+      widths:
+      - 4.0
+      mix_weights:
+      - 1.0
+    6:
+      peaks:
+      - 1.2
+      widths:
+      - 4.0
+      mix_weights:
+      - 1.0
+path:
+  output_path: data/paper_suite/datasets/final_logical_tpp/seed_111/num_predicates_20.pkl
+intensity_model: canonical_loglink
+synthetic_generation_model: canonical_loglink

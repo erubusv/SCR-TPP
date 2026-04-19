@@ -1,0 +1,42 @@
+{
+  "ablation_excitation_only": {
+    "benchmark": "ablation_excitation_only",
+    "data_path": "/home/yangmg1216/hnstpp/data/paper_suite/datasets/final_logical_tpp/seed_111/ablation_excitation_only.pkl",
+    "config_path": "/home/yangmg1216/hnstpp/data/paper_suite/configs/final_logical_tpp/ablation_excitation_only.yaml",
+    "target": 8,
+    "device": "cuda:0",
+    "intensity_model": "canonical_loglink",
+    "bic": Infinity,
+    "elapsed_sec": 157.70743562933058,
+    "family_attribution_passes": 1,
+    "post_prune_kernel_df": false,
+    "post_prune_penalty_scale": 1.0,
+    "post_prune_min_order": 1,
+    "post_prune_max_drop_size": 2,
+    "component_subset_search": true,
+    "component_same_sign_only": true,
+    "selected_rule_count": 0,
+    "true_rule_count": 6,
+    "matched": [],
+    "missing": [
+      "A -> T : excitation",
+      "B -> T : excitation",
+      "C and D -> T : excitation",
+      "C and G and H -> T : excitation",
+      "D and F and G -> T : excitation",
+      "E and F -> T : excitation"
+    ],
+    "extra": [],
+    "predicted": [],
+    "recall": 0.0,
+    "precision": 0.0,
+    "kernel_recovery": {
+      "num_rule_source_pairs": 0,
+      "mean_l1": 0.0,
+      "mean_l2": 0.0,
+      "max_l1": 0.0,
+      "max_l2": 0.0,
+      "details": []
+    }
+  }
+}

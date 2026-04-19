@@ -1,0 +1,26 @@
+{
+  "benchmark": "ablation_excitation_only",
+  "variant": "seed_partition_forward",
+  "bic": 77458.40850668895,
+  "elapsed_sec": 1567.9854964781553,
+  "matched": [
+    "A -> T : excitation",
+    "B -> T : excitation",
+    "C and D -> T : excitation",
+    "C and G and H -> T : excitation",
+    "D and F and G -> T : excitation",
+    "E and F -> T : excitation"
+  ],
+  "missing": [],
+  "extra": [],
+  "predicted": [
+    "A -> T : excitation",
+    "B -> T : excitation",
+    "C and D -> T : excitation",
+    "C and G and H -> T : excitation",
+    "D and F and G -> T : excitation",
+    "E and F -> T : excitation"
+  ],
+  "recall": 1.0,
+  "precision": 1.0
+}

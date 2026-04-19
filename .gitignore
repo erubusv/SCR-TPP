@@ -9,7 +9,4 @@ __pycache__/
 .vscode/
 
 .DS_Store
-**/*.pkl
-**/*.pt
-autonomous_codex/
 **/.*
