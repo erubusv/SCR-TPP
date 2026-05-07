@@ -1,0 +1,147 @@
+seed: 111
+time_horizon: 120.0
+num_event_types: 20
+num_samples: 1000
+max_len: null
+activation_mode: product_max_witness
+kernel: triangular
+base_intensity:
+  0: 0.1
+  1: 0.1
+  2: 0.1
+  3: 0.1
+  4: 0.1
+  5: 0.1
+  6: 0.1
+  7: 0.1
+  8: 0.05
+  9: 0.05
+  10: 0.05
+  11: 0.05
+  12: 0.05
+  13: 0.05
+  14: 0.05
+  15: 0.05
+  16: 0.05
+  17: 0.05
+  18: 0.05
+  19: 0.01
+rules:
+- id: 0
+  target: 19
+  W_pos: 2.2
+  W_neg: 0.0
+  condition:
+    0:
+      peaks:
+      - 0.5
+      widths:
+      - 2.3
+      mix_weights:
+      - 1.0
+- id: 1
+  target: 19
+  W_pos: 0.0
+  W_neg: 2.2
+  condition:
+    1:
+      peaks:
+      - 0.6
+      widths:
+      - 2.4
+      mix_weights:
+      - 1.0
+- id: 2
+  target: 19
+  W_pos: 3.2
+  W_neg: 0.0
+  condition:
+    2:
+      peaks:
+      - 0.7
+      widths:
+      - 2.5
+      mix_weights:
+      - 1.0
+    3:
+      peaks:
+      - 2.2
+      widths:
+      - 4.3
+      mix_weights:
+      - 1.0
+- id: 3
+  target: 19
+  W_pos: 0.0
+  W_neg: 3.8
+  condition:
+    4:
+      peaks:
+      - 0.6
+      widths:
+      - 2.5
+      mix_weights:
+      - 1.0
+    5:
+      peaks:
+      - 2.4
+      widths:
+      - 4.4
+      mix_weights:
+      - 1.0
+- id: 4
+  target: 19
+  W_pos: 3.8
+  W_neg: 0.0
+  condition:
+    2:
+      peaks:
+      - 1.6
+      widths:
+      - 3.4
+      mix_weights:
+      - 1.0
+    6:
+      peaks:
+      - 2.4
+      widths:
+      - 4.0
+      mix_weights:
+      - 1.0
+    7:
+      peaks:
+      - 4.1
+      widths:
+      - 6.0
+      mix_weights:
+      - 1.0
+- id: 5
+  target: 19
+  W_pos: 0.0
+  W_neg: 12.0
+  condition:
+    3:
+      peaks:
+      - 1.4
+      widths:
+      - 3.2
+      mix_weights:
+      - 1.0
+    5:
+      peaks:
+      - 3.6
+      widths:
+      - 5.2
+      mix_weights:
+      - 1.0
+    6:
+      peaks:
+      - 5.1
+      widths:
+      - 7.0
+      mix_weights:
+      - 1.0
+path:
+  output_path: data/paper_suite/datasets/hetero_source_1000_adjusted/seed_111/num_predicates_20.pkl
+intensity_model: canonical_loglink
+synthetic_generation_model: canonical_loglink

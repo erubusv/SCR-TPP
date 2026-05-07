@@ -1,0 +1,13 @@
+logic/data
+logic/data-old
+logic/log
+logic/model
+/data
+/log
+/model
+*.cpython-37.pyc
+*.pyc
+*.npz
+*.pkl
+/misc
+logic

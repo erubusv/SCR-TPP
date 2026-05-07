@@ -1,26 +1,19 @@
 services:
-  hnsttp:
+  scr-tpp:
     build: .
-    container_name: pytorch-research
-    privileged: true
-    pid: host
-    shm_size: '8gb'
-
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
+    image: scr-tpp:latest
+    container_name: scr-tpp
+    shm_size: '16gb'
+    gpus: all
+    working_dir: /workspace
     volumes:
       - ./:/workspace
-
-    ports:
-      - "8888:8888"
-
+    environment:
+      PYTHONPATH: /workspace
+      OMP_NUM_THREADS: "12"
+      MKL_NUM_THREADS: "12"
+      OPENBLAS_NUM_THREADS: "12"
+      NUMEXPR_NUM_THREADS: "12"
     stdin_open: true
     tty: true
-    restart: unless-stopped
-    command: jupyter lab --ip=0.0.0.0 --allow-root --no-browser --NotebookApp.token=''
+    command: bash

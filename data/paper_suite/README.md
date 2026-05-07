@@ -1,26 +1,23 @@
 # Paper Suite Layout
 
-This directory is organized so the path itself explains both the benchmark name
-and the seed.
+This directory holds reproducible synthetic benchmark configs. Generated
+datasets, logs, and result tables are local artifacts and are ignored by git.
 
 ## Structure
 
-- `configs/final_logical_tpp/`
-  - final human-readable benchmark configs
+- `configs/hetero_source_2000_adjusted/`
+  - main synthetic benchmark configs
   - one file per benchmark, for example `logical_context.yaml`
-  - these keep intuitive raw-scale `base_intensity`, `W_pos`, and `W_neg`
-  - generation and learning are both canonical log-link with
-    `synthetic_generation_model: canonical_loglink`
-    and `intensity_model: canonical_loglink`
-- `datasets/final_logical_tpp/seed_111/`
-- `datasets/final_logical_tpp/seed_222/`
-- `datasets/final_logical_tpp/seed_333/`
-- `datasets/final_logical_tpp/seed_444/`
-- `datasets/final_logical_tpp/seed_555/`
-  - generated dataset pickles for each benchmark/seed pair
-  - filenames are short benchmark names such as `logical_context.pkl`
-- `results/`
-  - benchmark summary outputs written by the active runner
+  - canonical log-link generation and learning
+  - hetero-source rule-source kernels
+- `configs/hetero_source_500_adjusted/`
+  - data-size ablation configs
+- `configs/hetero_source_1000_adjusted/`
+  - data-size ablation configs
+- `datasets/`
+  - generated locally by the synthetic data scripts
+- `results/` and `logs/`
+  - generated locally by benchmark runners
 
 ## Naming
 
@@ -30,5 +27,5 @@ and the seed.
   - `kernel_gaussian`
   - `num_predicates_20`
 - seed identity is carried by the folder:
-  - `datasets/final_logical_tpp/seed_111/...`
-  - `datasets/final_logical_tpp/seed_222/...`
+  - `datasets/hetero_source_2000_adjusted/seed_111/...`
+  - `datasets/hetero_source_2000_adjusted/seed_222/...`

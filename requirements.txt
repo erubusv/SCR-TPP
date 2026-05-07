@@ -4,3 +4,9 @@ scikit-learn
 matplotlib
 jupyterlab
 numba
+scipy
+PyYAML
+tensorboard
+packaging
+datasets
+omegaconf

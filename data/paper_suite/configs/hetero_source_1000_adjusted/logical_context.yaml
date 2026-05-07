@@ -1,0 +1,154 @@
+seed: 111
+time_horizon: 120.0
+num_event_types: 8
+num_samples: 1000
+max_len: null
+activation_mode: product_max_witness
+kernel: triangular
+base_intensity:
+  0: 0.16
+  1: 0.16
+  2: 0.15
+  3: 0.15
+  4: 0.15
+  5: 0.14
+  6: 0.14
+  7: 0.01
+rules:
+- id: 0
+  target: 7
+  W_pos: 1.8
+  W_neg: 0.0
+  condition:
+    0:
+      peaks:
+      - 0.5
+      widths:
+      - 2.3
+      mix_weights:
+      - 1.0
+- id: 1
+  target: 7
+  W_pos: 0.0
+  W_neg: 1.8
+  condition:
+    1:
+      peaks:
+      - 0.6
+      widths:
+      - 2.4
+      mix_weights:
+      - 1.0
+- id: 2
+  target: 7
+  W_pos: 0.0
+  W_neg: 3.2
+  condition:
+    0:
+      peaks:
+      - 1.4
+      widths:
+      - 3.2
+      mix_weights:
+      - 1.0
+    2:
+      peaks:
+      - 2.4
+      widths:
+      - 4.4
+      mix_weights:
+      - 1.0
+    3:
+      peaks:
+      - 3.8
+      widths:
+      - 6.1
+      mix_weights:
+      - 1.0
+- id: 3
+  target: 7
+  W_pos: 3.4
+  W_neg: 0.0
+  condition:
+    1:
+      peaks:
+      - 1.5
+      widths:
+      - 3.3
+      mix_weights:
+      - 1.0
+    2:
+      peaks:
+      - 3.4
+      widths:
+      - 5.5
+      mix_weights:
+      - 1.0
+    3:
+      peaks:
+      - 4.9
+      widths:
+      - 7.1
+      mix_weights:
+      - 1.0
+- id: 4
+  target: 7
+  W_pos: 0.0
+  W_neg: 1.8
+  condition:
+    4:
+      peaks:
+      - 0.7
+      widths:
+      - 2.5
+      mix_weights:
+      - 1.0
+- id: 5
+  target: 7
+  W_pos: 3.0
+  W_neg: 0.0
+  condition:
+    4:
+      peaks:
+      - 1.5
+      widths:
+      - 3.4
+      mix_weights:
+      - 1.0
+    5:
+      peaks:
+      - 2.5
+      widths:
+      - 4.5
+      mix_weights:
+      - 1.0
+- id: 6
+  target: 7
+  W_pos: 0.0
+  W_neg: 3.2
+  condition:
+    4:
+      peaks:
+      - 2.4
+      widths:
+      - 4.2
+      mix_weights:
+      - 1.0
+    5:
+      peaks:
+      - 3.5
+      widths:
+      - 5.6
+      mix_weights:
+      - 1.0
+    6:
+      peaks:
+      - 3.8
+      widths:
+      - 6.0
+      mix_weights:
+      - 1.0
+path:
+  output_path: data/paper_suite/datasets/hetero_source_1000_adjusted/seed_111/logical_context.pkl
+intensity_model: canonical_loglink
+synthetic_generation_model: canonical_loglink

@@ -1,78 +1,50 @@
 # Paper Benchmark Active Path
 
-This folder groups the files that are actually needed to run the current
-synthetic paper benchmark path.
+This directory contains the active SCR-TPP training and evaluation code.
 
-## Active Files
+## Required Files
 
-- [run_paper_benchmarks.py](/home/yangmg1216/hnstpp/workspace/train/paper_benchmark_active/run_paper_benchmarks.py)
-  - benchmark runner for the final `final_logical_tpp` suite
-- [rule_dependent_kernel_active_set.py](/home/yangmg1216/hnstpp/workspace/train/paper_benchmark_active/rule_dependent_kernel_active_set.py)
-  - retained mainline learner and final CLI
-- [conjunctive_rule_initializer.py](/home/yangmg1216/hnstpp/workspace/train/paper_benchmark_active/conjunctive_rule_initializer.py)
-  - feature/kernel initialization utilities used by the learner
+- [run_paper_benchmarks.py](/workspace/workspace/train/paper_benchmark_active/run_paper_benchmarks.py)
+  - benchmark runner and paper algorithm profile defaults
+- [run_paper_benchmarks_real_world.py](/workspace/workspace/train/paper_benchmark_active/run_paper_benchmarks_real_world.py)
+  - real-world SCR-TPP runner used by the benchmark harness
+- [run_fixed_support_kernel_mle.py](/workspace/workspace/train/paper_benchmark_active/run_fixed_support_kernel_mle.py)
+  - fixed-support final kernel-shape MLE for synthetic profile metrics
+- [rule_dependent_kernel_active_set.py](/workspace/workspace/train/paper_benchmark_active/rule_dependent_kernel_active_set.py)
+  - exact support refits, batched refits, canonical likelihood, and BIC utilities
+- [conjunctive_rule_initializer.py](/workspace/workspace/train/paper_benchmark_active/conjunctive_rule_initializer.py)
+  - strict-AND witness features and rule/kernel initialization utilities
+- [runtime_resources.py](/workspace/workspace/train/paper_benchmark_active/runtime_resources.py)
+  - CPU/GPU thread-resource configuration
+- [run_benchmarks.sh](/workspace/workspace/train/paper_benchmark_active/run_benchmarks.sh)
+  - thin shell wrapper around `run_paper_benchmarks.py`
 
-## Final Model
+## Algorithm
 
-The final synthetic benchmark path is fixed to:
+The default paper path runs:
 
-1. global source-kernel initialization
-2. raw active-set proposal
-3. `family_attribution_refine` with `1` pass
-4. fair rule-count BIC post-prune with
-   - `penalty_scale = 1.0`
-   - `min_order = 1`
-   - `max_drop_size = 2`
-5. same-sign overlap component exact subset search
+1. all-data synthetic likelihood-context construction
+2. sieve-priced column generation with deterministic `(order, sign)` strata
+3. free rule-source kernel polish
+4. exact pricing rescue
+5. exact drop certificate plus deterministic same-sign one-source extension certificate
+6. exact one-drop/one-add swap certificate
+7. numerical zero cleanup and final rule/kernel recovery reporting
 
-This directory no longer keeps experimental branches for:
-
-- penalty-scale grid search
-- intensity-model override at evaluation time
-- cross-sign / canonical / signed-chart selector variants
-
-## Supporting Docs
-
-- [paper_synthetic_benchmark_plan.md](/home/yangmg1216/hnstpp/workspace/train/research_docs/paper_synthetic_benchmark_plan.md)
-- [rule_dependent_kernel_research_notes.md](/home/yangmg1216/hnstpp/workspace/train/research_docs/rule_dependent_kernel_research_notes.md)
-
-Canonical document location:
-
-- [research_docs](/home/yangmg1216/hnstpp/workspace/train/research_docs)
-
-## Notes
-
-- This folder now contains the actual active benchmark code files.
-- The current best synthetic benchmark path does not depend on the removed
-  legacy scripts.
+The default data/config suite is `hetero_source_2000_adjusted`.
 
 ## Run
 
-From anywhere:
+From the repo root:
 
 ```bash
-/home/yangmg1216/hnstpp/workspace/train/paper_benchmark_active/run_benchmarks.sh
+workspace/train/paper_benchmark_active/run_benchmarks.sh
 ```
-
-By default, benchmark fitting now uses:
-
-- `cuda:0` when CUDA is available
-- `cpu` otherwise
-
-Synthetic dataset generation remains CPU-side because the event simulation path
-is not torch-accelerated.
 
 Or manually:
 
 ```bash
-PYTHONPATH=/home/yangmg1216/hnstpp python /home/yangmg1216/hnstpp/workspace/train/paper_benchmark_active/run_paper_benchmarks.py
+PYTHONPATH=/workspace python workspace/train/paper_benchmark_active/run_paper_benchmarks.py
 ```
 
-## Paper Suite Layout
-
-- configs:
-  - [final_logical_tpp](/home/yangmg1216/hnstpp/data/paper_suite/configs/final_logical_tpp)
-- datasets:
-  - [final_logical_tpp](/home/yangmg1216/hnstpp/data/paper_suite/datasets/final_logical_tpp)
-- results:
-  - [results](/home/yangmg1216/hnstpp/data/paper_suite/results)
+Synthetic dataset generation remains CPU-side; fitting uses CUDA when available.

@@ -1,19 +1,7 @@
-"""End-to-end sparse rule-dependent kernel learner.
-
-This experimental path keeps rule-specific kernels from the start:
-
-    g_{U,s}(tau) = sum_m h_{U,s,m} phi_m(tau),  h_{U,s,m} >= 0,  int g = 1
-
-Rules are added by one-sided point-process score tests and active rules are
-jointly optimized with their kernel heights and rule weights. The raw
-convolution basis responses are computed once and reused throughout.
-"""
+"""Rule-dependent kernel support refit utilities for the paper runner."""
 
 from __future__ import annotations
 
-import argparse
-import functools
-import itertools
 import math
 from dataclasses import dataclass
 
@@ -23,27 +11,10 @@ import torch.nn.functional as F
 
 from conjunctive_rule_initializer import (
     SourceBasisCache,
-    auto_grid_step,
+    WitnessQueryData,
     base_rate_fit,
-    bounded_source_activity,
-    build_midpoint_grid,
-    build_seq_event_arrays,
-    collect_target_events,
-    collect_weighted_lag_hist,
-    estimate_source_kernels,
-    format_rule,
-    gt_rules_from_config,
-    init_piecewise_heights,
-    load_dataset,
-    load_yaml,
-    normalize_piecewise_area,
-    normalized_kernel_response,
-    print_rule_block,
-    subset_list,
-    summarize_results,
-    trapz_area_weights,
+    normalize_piecewise_score,
 )
-from runtime_resources import configure_deterministic_research, configure_runtime_resources
 
 
 @dataclass(frozen=True)
@@ -52,49 +23,238 @@ class ActiveRule:
     sign: str
 
 
+@dataclass
+class SupportEvalResult:
+    bic: float
+    mu: float
+    exc_params: dict[int, float]
+    inh_params: dict[int, float]
+    rule_heights: dict[tuple[int, int], np.ndarray]
+    arrays_out: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] | None
+    active_rules: list[ActiveRule]
+
+
+SupportKey = tuple[tuple[int, str], ...]
+ExactSupportCacheKey = tuple[object, ...]
+
+
+@dataclass(frozen=True)
+class TorchWitnessQueryData:
+    num_queries: int
+    query_index: torch.Tensor
+    left_index: torch.Tensor
+    right_index: torch.Tensor
+    left_weight: torch.Tensor
+    right_weight: torch.Tensor
+
+
 class TorchBasisCache:
     def __init__(self, basis_cache: SourceBasisCache, device: torch.device):
         self._basis_cache = basis_cache
         self._device = device
-        self._cache: dict[tuple[int, str], torch.Tensor] = {}
+        self._cache: dict[tuple[int, str], TorchWitnessQueryData] = {}
+        self._combo_cache: dict[tuple[int, tuple[str, ...]], tuple[TorchWitnessQueryData, tuple[int, ...]]] = {}
 
-    def arrays(self, src: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _to_torch(self, data: WitnessQueryData) -> TorchWitnessQueryData:
+        return TorchWitnessQueryData(
+            num_queries=int(data.num_queries),
+            query_index=torch.as_tensor(data.query_index, dtype=torch.int64, device=self._device),
+            left_index=torch.as_tensor(data.left_index, dtype=torch.int64, device=self._device),
+            right_index=torch.as_tensor(data.right_index, dtype=torch.int64, device=self._device),
+            left_weight=torch.as_tensor(data.left_weight, dtype=torch.float32, device=self._device),
+            right_weight=torch.as_tensor(data.right_weight, dtype=torch.float32, device=self._device),
+        )
+
+    def arrays_for_rule_source(
+        self,
+        rule_idx: int | None,
+        src: int,
+    ) -> tuple[TorchWitnessQueryData, TorchWitnessQueryData, TorchWitnessQueryData, TorchWitnessQueryData]:
         src = int(src)
+        rule_key = None if rule_idx is None else int(rule_idx)
         keys = [
-            (src, "tr_ev"),
-            (src, "tr_gr"),
-            (src, "va_ev"),
-            (src, "va_gr"),
+            (rule_key, src, "tr_ev"),
+            (rule_key, src, "tr_gr"),
+            (rule_key, src, "va_ev"),
+            (rule_key, src, "va_gr"),
         ]
         missing = [key for key in keys if key not in self._cache]
         if missing:
-            b_tr_ev, b_tr_gr, b_va_ev, b_va_gr = self._basis_cache.arrays(src)
-            self._cache[(src, "tr_ev")] = torch.tensor(b_tr_ev, dtype=torch.float32, device=self._device)
-            self._cache[(src, "tr_gr")] = torch.tensor(b_tr_gr, dtype=torch.float32, device=self._device)
-            self._cache[(src, "va_ev")] = torch.tensor(b_va_ev, dtype=torch.float32, device=self._device)
-            self._cache[(src, "va_gr")] = torch.tensor(b_va_gr, dtype=torch.float32, device=self._device)
+            b_tr_ev, b_tr_gr, b_va_ev, b_va_gr = self._basis_cache.arrays_for_rule_source(rule_key, src)
+            self._cache[(rule_key, src, "tr_ev")] = self._to_torch(b_tr_ev)
+            self._cache[(rule_key, src, "tr_gr")] = self._to_torch(b_tr_gr)
+            self._cache[(rule_key, src, "va_ev")] = self._to_torch(b_va_ev)
+            self._cache[(rule_key, src, "va_gr")] = self._to_torch(b_va_gr)
         return (
-            self._cache[(src, "tr_ev")],
-            self._cache[(src, "tr_gr")],
-            self._cache[(src, "va_ev")],
-            self._cache[(src, "va_gr")],
+            self._cache[(rule_key, src, "tr_ev")],
+            self._cache[(rule_key, src, "tr_gr")],
+            self._cache[(rule_key, src, "va_ev")],
+            self._cache[(rule_key, src, "va_gr")],
         )
 
+    def arrays(self, src: int) -> tuple[TorchWitnessQueryData, TorchWitnessQueryData, TorchWitnessQueryData, TorchWitnessQueryData]:
+        return self.arrays_for_rule_source(None, int(src))
 
-def rule_param_dim(subset: tuple[int, ...], num_knots: int) -> int:
-    return int(1 + len(tuple(subset)) * max(int(num_knots) - 1, 0))
+    def combined_arrays(
+        self,
+        src: int,
+        parts: tuple[str, ...],
+        rule_idx: int | None = None,
+    ) -> tuple[TorchWitnessQueryData, tuple[int, ...]]:
+        src = int(src)
+        parts = tuple(str(part) for part in parts)
+        rule_key = None if rule_idx is None else int(rule_idx)
+        key = (rule_key, src, parts)
+        cached = self._combo_cache.get(key)
+        if cached is not None:
+            return cached
+
+        tr_ev, tr_gr, va_ev, va_gr = self.arrays_for_rule_source(rule_key, src)
+        lookup = {
+            "tr_ev": tr_ev,
+            "tr_gr": tr_gr,
+            "va_ev": va_ev,
+            "va_gr": va_gr,
+        }
+        arrays = [lookup[part] for part in parts]
+        sizes = tuple(int(arr.num_queries) for arr in arrays)
+        offsets = np.cumsum((0,) + sizes[:-1], dtype=np.int64)
+        query_index = torch.cat(
+            [arr.query_index + int(offset) for arr, offset in zip(arrays, offsets)],
+            dim=0,
+        )
+        combined = TorchWitnessQueryData(
+            num_queries=int(sum(sizes)),
+            query_index=query_index,
+            left_index=torch.cat([arr.left_index for arr in arrays], dim=0),
+            right_index=torch.cat([arr.right_index for arr in arrays], dim=0),
+            left_weight=torch.cat([arr.left_weight for arr in arrays], dim=0),
+            right_weight=torch.cat([arr.right_weight for arr in arrays], dim=0),
+        )
+        out = (combined, sizes)
+        self._combo_cache[key] = out
+        return out
 
 
-def model_param_dim(active_rules: list[ActiveRule], subsets, num_knots: int) -> int:
-    return int(1 + sum(rule_param_dim(subsets[int(ar.idx)], int(num_knots)) for ar in active_rules))
+def normalize_score_heights_torch(raw_heights: torch.Tensor) -> torch.Tensor:
+    x = torch.clamp(raw_heights, min=0.0)
+    peak = torch.amax(x)
+    if bool((peak > 1e-8).item()):
+        return x / torch.clamp(peak, min=1e-8)
+    out = torch.zeros_like(x)
+    if int(out.numel()) > 0:
+        out[0] = 1.0
+    return out
+
+
+def normalize_area_heights_torch(raw_heights: torch.Tensor, knots: torch.Tensor) -> torch.Tensor:
+    x = torch.clamp(raw_heights, min=0.0)
+    if int(x.numel()) <= 1:
+        return torch.ones_like(x)
+    area = torch.trapz(x, knots)
+    if bool((area > 1e-8).item()):
+        return x / torch.clamp(area, min=1e-8)
+    span = torch.clamp(knots[-1] - knots[0], min=1e-8)
+    return torch.ones_like(x) / span
+
+
+def normalize_kernel_heights_torch(
+    raw_heights: torch.Tensor,
+    *,
+    knots: torch.Tensor | None,
+    mode: str,
+) -> torch.Tensor:
+    mode = str(mode)
+    if mode == "peak":
+        return normalize_score_heights_torch(raw_heights)
+    if mode == "area":
+        if knots is None:
+            raise ValueError("area-normalized kernels require knot locations")
+        return normalize_area_heights_torch(raw_heights, knots)
+    raise ValueError(f"unknown kernel normalization mode: {mode}")
+
+
+def ensure_feasible_score_heights_numpy(raw_heights: np.ndarray) -> np.ndarray:
+    x = normalize_piecewise_score(np.asarray(raw_heights, dtype=np.float64))
+    if x.size > 0 and float(np.max(x)) <= 1e-12:
+        x = np.zeros_like(x, dtype=np.float64)
+        x[0] = 1.0
+    return x
+
+
+def second_difference_smoothness_torch(heights: torch.Tensor) -> torch.Tensor:
+    if int(heights.numel()) < 3:
+        return torch.zeros((), dtype=torch.float32, device=heights.device)
+    d2 = heights[2:] - 2.0 * heights[1:-1] + heights[:-2]
+    return torch.sum(d2 * d2)
+
+
+def witness_response_torch_batched(
+    data: TorchWitnessQueryData,
+    heights_batch: torch.Tensor,
+    *,
+    clip_upper: bool = True,
+) -> torch.Tensor:
+    batch_size = int(heights_batch.shape[0])
+    num_queries = int(data.num_queries)
+    out = torch.zeros((batch_size, num_queries), dtype=torch.float32, device=heights_batch.device)
+    if batch_size == 0 or int(data.query_index.numel()) == 0:
+        return out
+    vals = (
+        data.left_weight.unsqueeze(0) * heights_batch[:, data.left_index]
+        + data.right_weight.unsqueeze(0) * heights_batch[:, data.right_index]
+    )
+    vals = torch.clamp(vals, min=0.0)
+    if bool(clip_upper):
+        vals = torch.clamp(vals, max=1.0)
+    flat_out = torch.zeros((batch_size * num_queries,), dtype=torch.float32, device=heights_batch.device)
+    offsets = torch.arange(batch_size, device=heights_batch.device, dtype=torch.int64).unsqueeze(1) * int(num_queries)
+    flat_index = (data.query_index.unsqueeze(0) + offsets).reshape(-1)
+    flat_vals = vals.reshape(-1)
+    flat_out.scatter_reduce_(0, flat_index, flat_vals, reduce="amax", include_self=True)
+    return flat_out.view(batch_size, num_queries)
+
+
+def kernel_param_key(
+    *,
+    idx: int,
+    sign: str,
+    src: int,
+    subsets,
+):
+    return ("rule_src", int(idx), int(src))
+
+
+def kernel_group_count(
+    active_rules: list[ActiveRule],
+    subsets,
+) -> int:
+    groups = {
+        kernel_param_key(
+            idx=int(ar.idx),
+            sign=str(ar.sign),
+            src=int(src),
+            subsets=subsets,
+        )
+        for ar in active_rules
+        for src in subsets[int(ar.idx)]
+    }
+    return int(len(groups))
+
+
+def model_param_dim(
+    active_rules: list[ActiveRule],
+    subsets,
+    num_knots: int,
+) -> float:
+    _ = int(num_knots)
+    # Count each selected rule-source kernel block once.
+    kernel_df = 1.0
+    return float(1 + len(active_rules) + kernel_group_count(active_rules, subsets) * float(kernel_df))
 
 
 def bic_sample_size(num_sequences: int) -> int:
-    # For the benchmark suite we observe independent trajectories and
-    # approximate the continuous-time likelihood on each of them. The grid
-    # points are numerical quadrature locations, not additional independent
-    # observations, so BIC should scale with the number of sequences rather
-    # than the number of quadrature points.
+    # BIC is scaled by independent trajectories, not quadrature points.
     return max(int(num_sequences), 2)
 
 
@@ -107,327 +267,240 @@ def inverse_softplus(x: np.ndarray) -> np.ndarray:
     return out
 
 
-def build_global_activity(
-    *,
-    train_arrays,
-    val_arrays,
-    kernels,
-    source_ids,
-    tr_event_seq,
-    tr_event_times,
-    tr_grid_seq,
-    tr_grid_times,
-    va_event_seq,
-    va_event_times,
-    va_grid_seq,
-    va_grid_times,
-):
-    from conjunctive_rule_initializer import compute_source_signal_matrix
-
-    z_train_event = compute_source_signal_matrix(
-        train_arrays, kernels, source_ids=source_ids, seq_ids=tr_event_seq, times=tr_event_times
-    )
-    z_val_event = compute_source_signal_matrix(
-        val_arrays, kernels, source_ids=source_ids, seq_ids=va_event_seq, times=va_event_times
-    )
-    z_train_grid = compute_source_signal_matrix(
-        train_arrays, kernels, source_ids=source_ids, seq_ids=tr_grid_seq, times=tr_grid_times
-    )
-    z_val_grid = compute_source_signal_matrix(
-        val_arrays, kernels, source_ids=source_ids, seq_ids=va_grid_seq, times=va_grid_times
-    )
-    return (
-        bounded_source_activity(z_train_event),
-        bounded_source_activity(z_train_grid),
-        bounded_source_activity(z_val_event),
-        bounded_source_activity(z_val_grid),
-    )
-
-
 def initialize_rule_specific_heights(
     *,
     subsets,
     source_ids,
     global_kernels,
-    global_activity_event,
-    src_to_col_global,
-    train_arrays,
-    train_event_lag_bin_cache,
-    max_lag,
-    num_bins,
-    time_horizon,
 ):
-    total_time = float(len(train_arrays)) * float(time_horizon)
-    source_counts = {int(s): 0 for s in source_ids}
-    for by_type in train_arrays:
-        for src in source_ids:
-            source_counts[int(src)] += int(by_type.get(int(src), np.zeros((0,), dtype=np.float64)).size)
-
-    edges = np.linspace(0.0, float(max_lag), int(num_bins) + 1)
-    bin_width = float(edges[1] - edges[0])
     out: dict[tuple[int, int], np.ndarray] = {}
     for idx, subset in enumerate(subsets):
         subset = tuple(int(s) for s in subset)
         for src in subset:
-            other = [int(u) for u in subset if int(u) != int(src)]
-            if other:
-                weights = np.ones((global_activity_event.shape[0],), dtype=np.float64)
-                for u in other:
-                    weights *= np.clip(global_activity_event[:, src_to_col_global[int(u)]], 0.0, 1.0)
-            else:
-                weights = np.ones((global_activity_event.shape[0],), dtype=np.float64)
-            effective_weight = float(np.sum(weights))
-            if effective_weight <= 1e-8:
-                out[(int(idx), int(src))] = np.asarray(global_kernels[int(src)].heights, dtype=np.float64).copy()
-                continue
-            hist = collect_weighted_lag_hist(
-                source=int(src),
-                event_weights=weights,
-                event_lag_bin_cache=train_event_lag_bin_cache,
-            )
-            src_rate = float(source_counts[int(src)]) / max(total_time, 1e-8)
-            expected = np.full_like(hist, src_rate * effective_weight * bin_width)
-            heights = init_piecewise_heights(
-                hist=hist,
-                edges=edges,
-                expected=expected,
-                knots=np.asarray(global_kernels[int(src)].knots, dtype=np.float64),
-            )
-            out[(int(idx), int(src))] = heights
+            out[(int(idx), int(src))] = np.asarray(global_kernels[int(src)].heights, dtype=np.float64).copy()
     return out
 
 
-def compute_rule_feature_arrays(
-    *,
-    subsets,
-    basis_cache: SourceBasisCache,
-    rule_heights: dict[tuple[int, int], np.ndarray],
-    kernels,
-):
-    area_weights = trapz_area_weights(next(iter(kernels.values())).knots)
-    out: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
-    for idx, subset in enumerate(subsets):
-        subset = tuple(int(s) for s in subset)
-        tr_parts = []
-        tr_grid_parts = []
-        va_parts = []
-        va_grid_parts = []
-        for src in subset:
-            b_tr_ev, b_tr_gr, b_va_ev, b_va_gr = basis_cache.arrays(int(src))
-            z_tr_ev, h = normalized_kernel_response(b_tr_ev, rule_heights[(int(idx), int(src))], area_weights)
-            z_tr_gr, _ = normalized_kernel_response(b_tr_gr, rule_heights[(int(idx), int(src))], area_weights)
-            z_va_ev, _ = normalized_kernel_response(b_va_ev, rule_heights[(int(idx), int(src))], area_weights)
-            z_va_gr, _ = normalized_kernel_response(b_va_gr, rule_heights[(int(idx), int(src))], area_weights)
-            rule_heights[(int(idx), int(src))] = h
-            tr_parts.append(bounded_source_activity(z_tr_ev))
-            tr_grid_parts.append(bounded_source_activity(z_tr_gr))
-            va_parts.append(bounded_source_activity(z_va_ev))
-            va_grid_parts.append(bounded_source_activity(z_va_gr))
-        out[int(idx)] = (
-            np.prod(np.column_stack(tr_parts), axis=1),
-            np.prod(np.column_stack(tr_grid_parts), axis=1),
-            np.prod(np.column_stack(va_parts), axis=1),
-            np.prod(np.column_stack(va_grid_parts), axis=1),
-        )
-    return out
+def support_key_from_rules(active_rules: list[ActiveRule]) -> SupportKey:
+    return tuple((int(ar.idx), str(ar.sign)) for ar in active_rules)
 
 
-def compute_active_rule_feature_arrays(
+def exact_support_cache_key(
     *,
     active_rules: list[ActiveRule],
-    subsets,
     basis_cache: SourceBasisCache,
-    rule_heights: dict[tuple[int, int], np.ndarray],
-    kernels,
-) -> dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
-    if not active_rules:
-        return {}
-    area_weights = trapz_area_weights(next(iter(kernels.values())).knots)
-    out: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
-    seen_idx: set[int] = set()
-    for ar in active_rules:
-        idx = int(ar.idx)
-        if idx in seen_idx:
-            continue
-        seen_idx.add(idx)
-        subset = tuple(int(s) for s in subsets[idx])
-        tr_parts = []
-        tr_grid_parts = []
-        va_parts = []
-        va_grid_parts = []
-        for src in subset:
-            b_tr_ev, b_tr_gr, b_va_ev, b_va_gr = basis_cache.arrays(int(src))
-            z_tr_ev, h = normalized_kernel_response(b_tr_ev, rule_heights[(idx, int(src))], area_weights)
-            z_tr_gr, _ = normalized_kernel_response(b_tr_gr, rule_heights[(idx, int(src))], area_weights)
-            z_va_ev, _ = normalized_kernel_response(b_va_ev, rule_heights[(idx, int(src))], area_weights)
-            z_va_gr, _ = normalized_kernel_response(b_va_gr, rule_heights[(idx, int(src))], area_weights)
-            rule_heights[(idx, int(src))] = h
-            tr_parts.append(bounded_source_activity(z_tr_ev))
-            tr_grid_parts.append(bounded_source_activity(z_tr_gr))
-            va_parts.append(bounded_source_activity(z_va_ev))
-            va_grid_parts.append(bounded_source_activity(z_va_gr))
-        out[idx] = (
-            np.prod(np.column_stack(tr_parts), axis=1),
-            np.prod(np.column_stack(tr_grid_parts), axis=1),
-            np.prod(np.column_stack(va_parts), axis=1),
-            np.prod(np.column_stack(va_grid_parts), axis=1),
-        )
-    return out
-
-def rule_score(
-    *,
-    feat_event: np.ndarray,
-    feat_grid: np.ndarray,
-    mu: float,
-    exc_event: np.ndarray,
-    inh_event: np.ndarray,
-    exc_grid: np.ndarray,
-    inh_grid: np.ndarray,
+    base_rule_heights: dict[tuple[int, int], np.ndarray],
+    template_rule_heights: dict[str, dict[tuple[int, int], np.ndarray]] | None,
     grid_weights_train: np.ndarray,
-    penalty: float,
-    intensity_model: str = "multiplicative",
-) -> tuple[float, str, float]:
-    if str(intensity_model) == "canonical_loglink":
-        base_lp_grid = exc_grid - inh_grid
-        base_mass = grid_weights_train * np.exp(np.clip(base_lp_grid, -40.0, 40.0))
-        base_norm = float(np.sum(base_mass))
-        if base_norm <= 1e-12:
-            return -1e18, "exc", 1e-4
-
-        s_event = float(np.sum(feat_event))
-        n_events = int(feat_event.size)
-
-        def _profile_gain(sign: str) -> tuple[float, float]:
-            coef = profiled_coef_canonical(
-                feat_event=feat_event,
-                feat_grid=feat_grid,
-                base_lp_grid=base_lp_grid,
-                grid_weights_train=grid_weights_train,
-                sign=str(sign),
-            )
-            signed = 1.0 if str(sign) == "exc" else -1.0
-            expo = np.exp(np.clip(signed * float(coef) * feat_grid, -40.0, 40.0))
-            new_norm = float(np.dot(base_mass, expo))
-            if not np.isfinite(new_norm) or new_norm <= 1e-300:
-                return -1e18, float(max(coef, 1e-4))
-            ll_gain = signed * float(coef) * s_event - float(n_events) * math.log(new_norm / base_norm)
-            return float(ll_gain - float(penalty)), float(max(coef, 1e-4))
-
-        gain_exc, coef_exc = _profile_gain("exc")
-        gain_inh, coef_inh = _profile_gain("inh")
-    else:
-        eta_event = np.clip(float(mu) + exc_event, 1e-8, None)
-        eta_grid = np.clip(float(mu) + exc_grid, 1e-8, None)
-        exp_neg_i_grid = np.exp(-inh_grid)
-        lam0_grid = eta_grid * exp_neg_i_grid
-
-        inv_eta_event = 1.0 / eta_event
-        inv_eta_sq = inv_eta_event * inv_eta_event
-        g_exc = float(np.dot(feat_event, inv_eta_event) - np.dot(feat_grid, grid_weights_train * exp_neg_i_grid))
-        h_exc = float(np.dot(feat_event * inv_eta_sq, feat_event))
-        gain_exc = -1e18
-        coef_exc = 0.0
-        if g_exc > 1e-10 and h_exc > 1e-10:
-            coef_exc = float(g_exc / h_exc)
-            gain_exc = 0.5 * float(g_exc * coef_exc) - float(penalty)
-
-        g_inh = float(-np.sum(feat_event) + np.dot(feat_grid, grid_weights_train * lam0_grid))
-        h_inh = float(np.dot(feat_grid * (grid_weights_train * lam0_grid), feat_grid))
-        gain_inh = -1e18
-        coef_inh = 0.0
-        if g_inh > 1e-10 and h_inh > 1e-10:
-            coef_inh = float(g_inh / h_inh)
-            gain_inh = 0.5 * float(g_inh * coef_inh) - float(penalty)
-
-    if gain_exc >= gain_inh:
-        return gain_exc, "exc", max(coef_exc, 1e-4)
-    return gain_inh, "inh", max(coef_inh, 1e-4)
-
-
-def profiled_coef_canonical(
-    *,
-    feat_event: np.ndarray,
-    feat_grid: np.ndarray,
-    base_lp_grid: np.ndarray,
-    grid_weights_train: np.ndarray,
-    sign: str,
-) -> float:
-    feat_event = np.asarray(feat_event, dtype=np.float64)
-    feat_grid = np.asarray(feat_grid, dtype=np.float64)
-    base_lp_grid = np.asarray(base_lp_grid, dtype=np.float64)
-    grid_weights_train = np.asarray(grid_weights_train, dtype=np.float64)
-    if feat_event.size == 0 or feat_grid.size == 0:
-        return 1e-4
-    max_feat = float(np.max(feat_grid))
-    if max_feat <= 1e-12:
-        return 1e-4
-
-    signed = 1.0 if str(sign) == "exc" else -1.0
-    s_event = float(np.sum(feat_event))
-    base_mass = grid_weights_train * np.exp(np.clip(base_lp_grid, -40.0, 40.0))
-    g0 = float(np.sum(base_mass))
-    if g0 <= 1e-12:
-        return 1e-4
-
-    def _deriv(gamma: float) -> float:
-        expo = np.exp(np.clip(signed * float(gamma) * feat_grid, -40.0, 40.0))
-        g = float(np.dot(base_mass, expo))
-        if g <= 1e-300:
-            return -1e18
-        num = float(np.dot(base_mass, feat_grid * expo))
-        return signed * s_event - signed * float(feat_event.size) * num / g
-
-    d0 = _deriv(0.0)
-    if not np.isfinite(d0) or d0 <= 1e-10:
-        return 1e-4
-
-    gamma_cap = 40.0 / max_feat
-    lo = 0.0
-    hi = min(1.0, gamma_cap)
-    while hi < gamma_cap and _deriv(hi) > 0.0:
-        lo = hi
-        hi = min(2.0 * hi, gamma_cap)
-    if hi >= gamma_cap and _deriv(hi) > 0.0:
-        return float(max(gamma_cap, 1e-4))
-    for _ in range(60):
-        mid = 0.5 * (lo + hi)
-        if _deriv(mid) > 0.0:
-            lo = mid
-        else:
-            hi = mid
-    return float(max(0.5 * (lo + hi), 1e-4))
-
-
-def profiled_gain_canonical_sign(
-    *,
-    feat_event: np.ndarray,
-    feat_grid: np.ndarray,
-    base_lp_grid: np.ndarray,
-    grid_weights_train: np.ndarray,
-    sign: str,
-    penalty: float,
-) -> tuple[float, float]:
-    base_lp_grid = np.asarray(base_lp_grid, dtype=np.float64)
-    base_mass = np.asarray(grid_weights_train, dtype=np.float64) * np.exp(np.clip(base_lp_grid, -40.0, 40.0))
-    base_norm = float(np.sum(base_mass))
-    if base_norm <= 1e-12 or not np.isfinite(base_norm):
-        return -1e18, 1e-4
-    coef = profiled_coef_canonical(
-        feat_event=feat_event,
-        feat_grid=feat_grid,
-        base_lp_grid=base_lp_grid,
-        grid_weights_train=grid_weights_train,
-        sign=str(sign),
+    grid_weights_val: np.ndarray,
+    opt_steps: int,
+    lr: float,
+    penalize_kernel_df: bool,
+    penalty_scale: float,
+    kernel_smoothness_ridge: float,
+    num_val_sequences: int | None,
+    kernel_normalization: str = "peak",
+) -> ExactSupportCacheKey:
+    return (
+        support_key_from_rules(active_rules),
+        int(opt_steps),
+        float(lr),
+        bool(penalize_kernel_df),
+        float(penalty_scale),
+        float(kernel_smoothness_ridge),
+        str(kernel_normalization),
+        int(num_val_sequences if num_val_sequences is not None else -1),
+        id(basis_cache),
+        id(base_rule_heights),
+        id(template_rule_heights),
+        id(grid_weights_train),
+        id(grid_weights_val),
     )
-    signed = 1.0 if str(sign) == "exc" else -1.0
-    expo = np.exp(np.clip(signed * float(coef) * np.asarray(feat_grid, dtype=np.float64), -40.0, 40.0))
-    new_norm = float(np.dot(base_mass, expo))
-    if not np.isfinite(new_norm) or new_norm <= 1e-300:
-        return -1e18, float(max(coef, 1e-4))
-    s_event = float(np.sum(np.asarray(feat_event, dtype=np.float64)))
-    n_events = int(np.asarray(feat_event).size)
-    ll_gain = signed * float(coef) * s_event - float(n_events) * math.log(new_norm / base_norm)
-    return float(ll_gain - float(penalty)), float(max(coef, 1e-4))
+
+def minimal_cache_result(result: SupportEvalResult) -> SupportEvalResult:
+    return SupportEvalResult(
+        bic=float(result.bic),
+        mu=float(result.mu),
+        exc_params=dict(result.exc_params),
+        inh_params=dict(result.inh_params),
+        rule_heights=result.rule_heights,
+        arrays_out=None,
+        active_rules=list(result.active_rules),
+    )
+
+
+def _build_support_warm_start(
+    *,
+    target_rules: list[ActiveRule],
+    subsets,
+    base_rule_heights: dict[tuple[int, int], np.ndarray],
+    template_rule_heights: dict[str, dict[tuple[int, int], np.ndarray]] | None,
+    warm_start_result: SupportEvalResult | None = None,
+    fallback: float = 0.1,
+) -> tuple[dict[tuple[int, int], np.ndarray], dict[tuple[int, str], float]]:
+    init_rule_heights = dict(base_rule_heights)
+    init_coef_map = {
+        (int(ar.idx), str(ar.sign)): float(fallback)
+        for ar in target_rules
+    }
+    warm_rule_keys = set()
+    if warm_start_result is not None:
+        warm_rule_keys = {(int(ar.idx), str(ar.sign)) for ar in warm_start_result.active_rules}
+    for ar in target_rules:
+        rule_sources = tuple(int(src) for src in subsets[int(ar.idx)])
+        rule_key = (int(ar.idx), str(ar.sign))
+        if warm_start_result is not None and rule_key in warm_rule_keys:
+            beta = (
+                float(warm_start_result.exc_params.get(int(ar.idx), 0.0))
+                if str(ar.sign) == "exc"
+                else float(warm_start_result.inh_params.get(int(ar.idx), 0.0))
+            )
+            init_coef_map[rule_key] = max(beta, 1e-6)
+            for src in rule_sources:
+                key = (int(ar.idx), int(src))
+                warm_h = warm_start_result.rule_heights.get(key)
+                if warm_h is not None:
+                    init_rule_heights[key] = np.asarray(warm_h, dtype=np.float64).copy()
+                else:
+                    init_rule_heights[key] = np.asarray(base_rule_heights[key], dtype=np.float64).copy()
+            continue
+        sign_templates = template_rule_heights.get(str(ar.sign), {}) if template_rule_heights is not None else {}
+        for src in rule_sources:
+            key = (int(ar.idx), int(src))
+            tpl = sign_templates.get(key)
+            if tpl is not None:
+                init_rule_heights[key] = np.asarray(tpl, dtype=np.float64).copy()
+            else:
+                init_rule_heights[key] = np.asarray(base_rule_heights[key], dtype=np.float64).copy()
+    return init_rule_heights, init_coef_map
+
+def sort_unique_sign_exclusive_rules(
+    rules: list[ActiveRule],
+) -> list[ActiveRule]:
+    seen_sign_by_idx: dict[int, str] = {}
+    unique: dict[tuple[int, str], ActiveRule] = {}
+    for ar in rules:
+        idx = int(ar.idx)
+        sign = str(ar.sign)
+        old_sign = seen_sign_by_idx.get(idx)
+        if old_sign is not None and old_sign != sign:
+            raise ValueError(f"sign-exclusive support violated for subset {idx}: {old_sign} vs {sign}")
+        seen_sign_by_idx[idx] = sign
+        unique[(idx, sign)] = ActiveRule(idx=idx, sign=sign)
+    return sorted(unique.values(), key=lambda ar: (int(ar.idx), str(ar.sign)))
+
+
+def threshold_active_rules(
+    *,
+    active_rules: list[ActiveRule],
+    exc_params: dict[int, float],
+    inh_params: dict[int, float],
+    beta_threshold: float,
+) -> list[ActiveRule]:
+    kept: list[ActiveRule] = []
+    for ar in active_rules:
+        beta = float(exc_params.get(int(ar.idx), 0.0) if ar.sign == "exc" else inh_params.get(int(ar.idx), 0.0))
+        if beta > float(beta_threshold):
+            kept.append(ActiveRule(idx=int(ar.idx), sign=str(ar.sign)))
+    return sort_unique_sign_exclusive_rules(kept)
+
+
+def _profile_mu_canonical_torch(
+    *,
+    signed_grid: torch.Tensor,
+    grid_weights: torch.Tensor,
+    num_events: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    expo = torch.exp(torch.clamp(signed_grid, min=-40.0, max=40.0))
+    exposure = torch.dot(grid_weights, expo)
+    mu = torch.clamp(
+        torch.tensor(float(num_events), dtype=torch.float32, device=signed_grid.device)
+        / torch.clamp(exposure, min=1e-8),
+        min=1e-8,
+    )
+    return mu, exposure
+
+
+def _canonical_nll_from_signed_terms(
+    *,
+    signed_event_sum: torch.Tensor,
+    signed_grid: torch.Tensor,
+    grid_weights: torch.Tensor,
+    num_events: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    mu, exposure = _profile_mu_canonical_torch(
+        signed_grid=signed_grid,
+        grid_weights=grid_weights,
+        num_events=int(num_events),
+    )
+    n_events = float(num_events)
+    nll = -(torch.log(mu) * n_events + signed_event_sum) + mu * exposure
+    return nll, mu, exposure
+
+
+def _solve_beta_block_canonical(
+    *,
+    beta_init: torch.Tensor,
+    sign_tensor: torch.Tensor,
+    event_masses: torch.Tensor,
+    grid_matrix: torch.Tensor,
+    grid_weights: torch.Tensor,
+    num_events: int,
+    max_iter: int = 12,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if int(beta_init.numel()) == 0:
+        signed_grid = torch.zeros((grid_matrix.shape[1],), dtype=torch.float32, device=grid_matrix.device)
+        signed_event_sum = torch.zeros((), dtype=torch.float32, device=grid_matrix.device)
+        mu, _ = _profile_mu_canonical_torch(
+            signed_grid=signed_grid,
+            grid_weights=grid_weights,
+            num_events=int(num_events),
+        )
+        return beta_init.detach().clone(), mu.detach(), signed_event_sum, signed_grid
+
+    raw_beta = torch.nn.Parameter(
+        torch.tensor(
+            inverse_softplus(np.asarray(beta_init.detach().cpu().numpy(), dtype=np.float64)),
+            dtype=torch.float32,
+            device=beta_init.device,
+        )
+    )
+    opt_beta = torch.optim.LBFGS(
+        [raw_beta],
+        lr=1.0,
+        max_iter=max(1, int(max_iter)),
+        history_size=max(3, min(10, int(beta_init.numel()))),
+        line_search_fn="strong_wolfe",
+        tolerance_grad=1e-5,
+        tolerance_change=1e-8,
+    )
+
+    def closure():
+        opt_beta.zero_grad(set_to_none=True)
+        beta = F.softplus(raw_beta) + 1e-8
+        signed_beta = beta * sign_tensor
+        signed_event_sum = torch.dot(signed_beta, event_masses)
+        signed_grid = torch.matmul(signed_beta, grid_matrix)
+        nll, _mu, _exposure = _canonical_nll_from_signed_terms(
+            signed_event_sum=signed_event_sum,
+            signed_grid=signed_grid,
+            grid_weights=grid_weights,
+            num_events=int(num_events),
+        )
+        nll.backward()
+        return nll
+
+    opt_beta.step(closure)
+    beta = (F.softplus(raw_beta.detach()) + 1e-8).detach()
+    signed_beta = beta * sign_tensor
+    signed_event_sum = torch.dot(signed_beta, event_masses).detach()
+    signed_grid = torch.matmul(signed_beta, grid_matrix).detach()
+    mu, _exposure = _profile_mu_canonical_torch(
+        signed_grid=signed_grid,
+        grid_weights=grid_weights,
+        num_events=int(num_events),
+    )
+    return beta, mu.detach(), signed_event_sum, signed_grid
 
 
 def optimize_active_set_torch(
@@ -436,7 +509,6 @@ def optimize_active_set_torch(
     subsets,
     basis_cache: SourceBasisCache,
     rule_heights: dict[tuple[int, int], np.ndarray],
-    init_mu: float,
     init_coef_map: dict[tuple[int, str], float],
     grid_weights_train: np.ndarray,
     grid_weights_val: np.ndarray,
@@ -447,51 +519,54 @@ def optimize_active_set_torch(
     penalize_kernel_df: bool,
     penalty_scale: float = 1.0,
     bic_num_sequences: int | None = None,
-    intensity_model: str = "multiplicative",
-    kernel_anchor_heights: dict[tuple[int, int], np.ndarray] | None = None,
-    kernel_anchor_ridge: float = 0.0,
-    kernel_tie_mode: str = "none",
+    kernel_smoothness_ridge: float = 0.0,
+    kernel_normalization: str = "peak",
 ) -> tuple[float, float, dict[int, float], dict[int, float], dict[tuple[int, int], np.ndarray], dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]]:
+    # Keep untouched rule-source kernels as shared references and only replace
+    # active entries with newly fitted arrays. This avoids repeatedly deep
+    # copying the full candidate universe on every exact refit.
+    rule_heights = {
+        (int(idx), int(src)): np.asarray(val, dtype=np.float64)
+        for (idx, src), val in rule_heights.items()
+    }
     if not active_rules:
         mu = base_rate_fit(0, float(np.sum(grid_weights_train)))
         return float("inf"), mu, {}, {}, rule_heights, {}
 
+    kernel_normalization = str(kernel_normalization)
+    if kernel_normalization not in {"peak", "area"}:
+        raise ValueError(f"unknown kernel normalization mode: {kernel_normalization}")
+    clip_witness_upper = kernel_normalization == "peak"
+
     knots = basis_cache.knots
-    area_weights = torch.tensor(trapz_area_weights(knots), dtype=torch.float32, device=device)
-    gw_tr = torch.tensor(grid_weights_train, dtype=torch.float32, device=device)
-    gw_va = torch.tensor(grid_weights_val, dtype=torch.float32, device=device)
+    gw_tr = torch.as_tensor(grid_weights_train, dtype=torch.float32, device=device)
+    gw_va = torch.as_tensor(grid_weights_val, dtype=torch.float32, device=device)
 
     if torch_basis_cache is None:
         torch_basis_cache = TorchBasisCache(basis_cache, device)
 
-    raw_mu = torch.nn.Parameter(torch.tensor([inverse_softplus(np.asarray([init_mu], dtype=np.float64))[0]], dtype=torch.float32, device=device))
-    raw_coef = torch.nn.ParameterList()
     raw_heights: dict[tuple[object, ...], torch.nn.Parameter] = {}
-    anchor_tensors: dict[tuple[object, ...], torch.Tensor] = {}
-
     def param_key_for(ar: ActiveRule, src: int):
-        if str(kernel_tie_mode) == "source":
-            return ("src", int(src))
-        if str(kernel_tie_mode) == "source_sign":
-            return ("src_sign", int(src), str(ar.sign))
-        return ("rule_src", int(ar.idx), int(src))
+        return kernel_param_key(
+            idx=int(ar.idx),
+            sign=str(ar.sign),
+            src=int(src),
+            subsets=subsets,
+        )
 
+    beta_init = []
     for ar in active_rules:
         coef0 = float(init_coef_map.get((int(ar.idx), str(ar.sign)), 0.1))
-        raw_coef.append(torch.nn.Parameter(torch.tensor([inverse_softplus(np.asarray([coef0], dtype=np.float64))[0]], dtype=torch.float32, device=device)))
+        beta_init.append(max(coef0, 1e-6))
         for src in subsets[int(ar.idx)]:
             key = (int(ar.idx), int(src))
             pkey = param_key_for(ar, int(src))
             if pkey not in raw_heights:
-                h0 = np.asarray(rule_heights[key], dtype=np.float64)
-                raw_heights[pkey] = torch.nn.Parameter(torch.tensor(inverse_softplus(h0), dtype=torch.float32, device=device))
-                if kernel_anchor_heights is not None and key in kernel_anchor_heights:
-                    h_anchor = np.asarray(kernel_anchor_heights[key], dtype=np.float64)
-                    h_anchor = h_anchor / max(float(np.dot(trapz_area_weights(knots), h_anchor)), 1e-12)
-                    anchor_tensors[pkey] = torch.tensor(h_anchor, dtype=torch.float32, device=device)
+                h0 = ensure_feasible_score_heights_numpy(rule_heights[key])
+                raw_heights[pkey] = torch.nn.Parameter(
+                    torch.tensor(h0, dtype=torch.float32, device=device)
+                )
 
-    unique_sources = sorted({int(src) for ar in active_rules for src in subsets[int(ar.idx)]})
-    basis_tensors = {int(src): torch_basis_cache.arrays(int(src)) for src in unique_sources}
     rule_specs = [
         (
             ar,
@@ -500,224 +575,1066 @@ def optimize_active_set_torch(
         )
         for ar in active_rules
     ]
+    knot_tensors: dict[tuple[object, ...], torch.Tensor] = {}
+    for ar, rule_sources, rule_pkeys in rule_specs:
+        for src, pkey in zip(rule_sources, rule_pkeys):
+            if pkey in knot_tensors:
+                continue
+            knot_tensors[pkey] = torch.as_tensor(
+                basis_cache.knots_for_rule_source(int(ar.idx), int(src)),
+                dtype=torch.float32,
+                device=device,
+            )
+    use_rule_source_knots = bool(getattr(basis_cache, "rule_source_knots", {}))
+    source_users: dict[tuple[int | None, int], list[tuple[int, tuple[object, ...], int]]] = {}
+    for rule_row, (ar, rule_sources, rule_pkeys) in enumerate(rule_specs):
+        for src, pkey in zip(rule_sources, rule_pkeys):
+            group_key = (int(ar.idx), int(src)) if use_rule_source_knots else (None, int(src))
+            source_users.setdefault(group_key, []).append((int(rule_row), pkey, int(ar.idx)))
+    first_rule_idx = int(rule_specs[0][0].idx) if use_rule_source_knots else None
     first_src = int(rule_specs[0][1][0])
-    first_tr_ev, first_tr_gr, first_va_ev, first_va_gr = basis_tensors[first_src]
-    tr_event_len = int(first_tr_ev.shape[0])
-    tr_grid_len = int(first_tr_gr.shape[0])
-    va_event_len = int(first_va_ev.shape[0])
-    va_grid_len = int(first_va_gr.shape[0])
-    empty_val = torch.zeros((0,), dtype=torch.float32, device=device)
-
-    params = [raw_mu] + list(raw_coef) + list(raw_heights.values())
+    first_tr_ev, first_tr_gr, first_va_ev, first_va_gr = torch_basis_cache.arrays_for_rule_source(first_rule_idx, first_src)
+    tr_event_len = int(first_tr_ev.num_queries)
+    tr_grid_len = int(first_tr_gr.num_queries)
+    va_event_len = int(first_va_ev.num_queries)
+    va_grid_len = int(first_va_gr.num_queries)
+    sign_tensor = torch.tensor(
+        [1.0 if ar.sign == "exc" else -1.0 for ar in active_rules],
+        dtype=torch.float32,
+        device=device,
+    )
+    beta_current = torch.tensor(beta_init, dtype=torch.float32, device=device)
+    params = list(raw_heights.values())
     opt = torch.optim.Adam(params, lr=float(lr))
 
-    best_state = None
     best_bic = float("inf")
+    best_snapshot = None
 
-    def current_model(emit_numpy: bool = False, include_val: bool = True):
-        mu = F.softplus(raw_mu[0]) + 1e-8
-        exc_event = torch.zeros((tr_event_len,), dtype=torch.float32, device=device)
-        inh_event = torch.zeros((tr_event_len,), dtype=torch.float32, device=device)
-        exc_grid = torch.zeros((tr_grid_len,), dtype=torch.float32, device=device)
-        inh_grid = torch.zeros((tr_grid_len,), dtype=torch.float32, device=device)
-        if include_val:
-            exc_event_va = torch.zeros((va_event_len,), dtype=torch.float32, device=device)
-            inh_event_va = torch.zeros((va_event_len,), dtype=torch.float32, device=device)
-            exc_grid_va = torch.zeros((va_grid_len,), dtype=torch.float32, device=device)
-            inh_grid_va = torch.zeros((va_grid_len,), dtype=torch.float32, device=device)
-        else:
-            exc_event_va = empty_val
-            inh_event_va = empty_val
-            exc_grid_va = empty_val
-            inh_grid_va = empty_val
+    def project_raw_heights_(prev_params: dict[tuple[object, ...], torch.Tensor] | None = None):
+        with torch.no_grad():
+            for key, param in raw_heights.items():
+                param.clamp_(min=0.0)
+                norm_mass = (
+                    torch.amax(param)
+                    if kernel_normalization == "peak"
+                    else torch.trapz(param, knot_tensors[key])
+                )
+                if float(norm_mass.detach().cpu().item()) <= 1e-8 and prev_params is not None:
+                    param.copy_(
+                        normalize_kernel_heights_torch(
+                            prev_params[key],
+                            knots=knot_tensors.get(key),
+                            mode=kernel_normalization,
+                        )
+                    )
+                else:
+                    param.copy_(
+                        normalize_kernel_heights_torch(
+                            param,
+                            knots=knot_tensors.get(key),
+                            mode=kernel_normalization,
+                        )
+                    )
+                if kernel_normalization == "peak" and float(torch.amax(param).detach().cpu().item()) <= 1e-8:
+                    if prev_params is not None:
+                        prev = torch.clamp(prev_params[key], min=0.0)
+                        prev_peak = torch.amax(prev)
+                        if float(prev_peak.detach().cpu().item()) > 1e-8:
+                            param.copy_(prev / prev_peak)
+                            continue
+                    param.fill_(0.0)
+                    param[0] = 1.0
+
+    def build_feature_state(
+        *,
+        emit_numpy: bool = False,
+        include_train: bool = True,
+        include_val: bool = True,
+    ):
+        train_event_factors = [[] for _ in rule_specs] if include_train else None
+        train_grid_factors = [[] for _ in rule_specs] if include_train else None
+        val_event_factors = [[] for _ in rule_specs] if include_val else None
+        val_grid_factors = [[] for _ in rule_specs] if include_val else None
         arrays_out: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] | None = {} if emit_numpy else None
-        coef_out: dict[tuple[int, str], float] = {}
         heights_out: dict[tuple[int, int], np.ndarray] | None = {} if emit_numpy else None
-        kernel_reg = torch.zeros((), dtype=torch.float32, device=device)
+        kernel_smooth_reg = torch.zeros((), dtype=torch.float32, device=device)
+        normalized_heights: dict[tuple[object, ...], torch.Tensor] = {}
 
-        for j, (ar, rule_sources, rule_pkeys) in enumerate(rule_specs):
-            coef = F.softplus(raw_coef[j][0]) + 1e-8
-            if emit_numpy:
-                coef_out[(int(ar.idx), str(ar.sign))] = float(coef.detach().cpu().item())
-            feat_tr_ev = torch.ones((tr_event_len,), dtype=torch.float32, device=device)
-            feat_tr_gr = torch.ones((tr_grid_len,), dtype=torch.float32, device=device)
-            if include_val:
-                feat_va_ev = torch.ones((va_event_len,), dtype=torch.float32, device=device)
-                feat_va_gr = torch.ones((va_grid_len,), dtype=torch.float32, device=device)
+        for (rule_idx_for_knots, src), users in source_users.items():
+            rule_rows = [int(rule_row) for rule_row, _pkey, _idx in users]
+            pkeys = [pkey for _rule_row, pkey, _idx in users]
+            idxs = [int(idx) for _rule_row, _pkey, idx in users]
+            h_batch = []
+            for pkey in pkeys:
+                h = normalized_heights.get(pkey)
+                if h is None:
+                    h = normalize_kernel_heights_torch(
+                        raw_heights[pkey],
+                        knots=knot_tensors.get(pkey),
+                        mode=kernel_normalization,
+                    )
+                    normalized_heights[pkey] = h
+                    if float(kernel_smoothness_ridge) > 0.0:
+                        kernel_smooth_reg = kernel_smooth_reg + second_difference_smoothness_torch(h)
+                h_batch.append(h)
+            h_batch_t = torch.stack(h_batch, dim=0)
+            if heights_out is not None:
+                for rule_row, idx, h in zip(rule_rows, idxs, h_batch):
+                    key = (int(idx), int(src))
+                    if key not in heights_out:
+                        heights_out[key] = h.detach().cpu().numpy().astype(np.float64, copy=True)
+            if include_train and include_val:
+                combined, sizes = torch_basis_cache.combined_arrays(
+                    int(src),
+                    ("tr_ev", "tr_gr", "va_ev", "va_gr"),
+                    rule_idx=rule_idx_for_knots,
+                )
+                z_all = witness_response_torch_batched(combined, h_batch_t, clip_upper=clip_witness_upper)
+                n_tr_ev, n_tr_gr, n_va_ev, n_va_gr = sizes
+                cut0 = n_tr_ev
+                cut1 = cut0 + n_tr_gr
+                cut2 = cut1 + n_va_ev
+                z_tr_ev = z_all[:, :cut0]
+                z_tr_gr = z_all[:, cut0:cut1]
+                z_va_ev = z_all[:, cut1:cut2]
+                z_va_gr = z_all[:, cut2:]
+                for local_row, rule_row in enumerate(rule_rows):
+                    train_event_factors[rule_row].append(z_tr_ev[local_row])
+                    train_grid_factors[rule_row].append(z_tr_gr[local_row])
+                    val_event_factors[rule_row].append(z_va_ev[local_row])
+                    val_grid_factors[rule_row].append(z_va_gr[local_row])
+            elif include_train:
+                combined, sizes = torch_basis_cache.combined_arrays(
+                    int(src),
+                    ("tr_ev", "tr_gr"),
+                    rule_idx=rule_idx_for_knots,
+                )
+                z_all = witness_response_torch_batched(combined, h_batch_t, clip_upper=clip_witness_upper)
+                n_tr_ev, n_tr_gr = sizes
+                z_tr_ev = z_all[:, :n_tr_ev]
+                z_tr_gr = z_all[:, n_tr_ev:n_tr_ev + n_tr_gr]
+                for local_row, rule_row in enumerate(rule_rows):
+                    train_event_factors[rule_row].append(z_tr_ev[local_row])
+                    train_grid_factors[rule_row].append(z_tr_gr[local_row])
+            elif include_val:
+                combined, sizes = torch_basis_cache.combined_arrays(
+                    int(src),
+                    ("va_ev", "va_gr"),
+                    rule_idx=rule_idx_for_knots,
+                )
+                z_all = witness_response_torch_batched(combined, h_batch_t, clip_upper=clip_witness_upper)
+                n_va_ev, n_va_gr = sizes
+                z_va_ev = z_all[:, :n_va_ev]
+                z_va_gr = z_all[:, n_va_ev:n_va_ev + n_va_gr]
+                for local_row, rule_row in enumerate(rule_rows):
+                    val_event_factors[rule_row].append(z_va_ev[local_row])
+                    val_grid_factors[rule_row].append(z_va_gr[local_row])
+
+        train_event_masses: list[torch.Tensor] = []
+        train_grid_features: list[torch.Tensor] = []
+        val_event_masses: list[torch.Tensor] = []
+        val_grid_features: list[torch.Tensor] = []
+
+        for rule_row, (ar, _rule_sources, _rule_pkeys) in enumerate(rule_specs):
+            if include_train:
+                feat_tr_ev = (
+                    torch.prod(torch.stack(train_event_factors[rule_row], dim=0), dim=0)
+                    if train_event_factors[rule_row]
+                    else torch.ones((tr_event_len,), dtype=torch.float32, device=device)
+                )
+                feat_tr_gr = (
+                    torch.prod(torch.stack(train_grid_factors[rule_row], dim=0), dim=0)
+                    if train_grid_factors[rule_row]
+                    else torch.ones((tr_grid_len,), dtype=torch.float32, device=device)
+                )
+                train_event_masses.append(feat_tr_ev.sum())
+                train_grid_features.append(feat_tr_gr)
             else:
-                feat_va_ev = empty_val
-                feat_va_gr = empty_val
-            for src, pkey in zip(rule_sources, rule_pkeys):
-                key = (int(ar.idx), int(src))
-                h = F.softplus(raw_heights[pkey]) + 1e-8
-                h = h / torch.clamp(torch.dot(area_weights, h), min=1e-8)
-                if float(kernel_anchor_ridge) > 0.0 and pkey in anchor_tensors:
-                    kernel_reg = kernel_reg + torch.sum((h - anchor_tensors[pkey]) ** 2)
-                if heights_out is not None:
-                    heights_out[key] = h.detach().cpu().numpy().astype(np.float64, copy=True)
-                b_tr_ev, b_tr_gr, b_va_ev, b_va_gr = basis_tensors[int(src)]
-                z_tr_ev = b_tr_ev @ h
-                z_tr_gr = b_tr_gr @ h
-                feat_tr_ev = feat_tr_ev * (1.0 - torch.exp(-torch.clamp(z_tr_ev, min=0.0)))
-                feat_tr_gr = feat_tr_gr * (1.0 - torch.exp(-torch.clamp(z_tr_gr, min=0.0)))
-                if include_val:
-                    z_va_ev = b_va_ev @ h
-                    z_va_gr = b_va_gr @ h
-                    feat_va_ev = feat_va_ev * (1.0 - torch.exp(-torch.clamp(z_va_ev, min=0.0)))
-                    feat_va_gr = feat_va_gr * (1.0 - torch.exp(-torch.clamp(z_va_gr, min=0.0)))
+                feat_tr_ev = None
+                feat_tr_gr = None
+            if include_val:
+                feat_va_ev = (
+                    torch.prod(torch.stack(val_event_factors[rule_row], dim=0), dim=0)
+                    if val_event_factors[rule_row]
+                    else torch.ones((va_event_len,), dtype=torch.float32, device=device)
+                )
+                feat_va_gr = (
+                    torch.prod(torch.stack(val_grid_factors[rule_row], dim=0), dim=0)
+                    if val_grid_factors[rule_row]
+                    else torch.ones((va_grid_len,), dtype=torch.float32, device=device)
+                )
+                val_event_masses.append(feat_va_ev.sum())
+                val_grid_features.append(feat_va_gr)
+            else:
+                feat_va_ev = None
+                feat_va_gr = None
             if arrays_out is not None:
                 arrays_out[int(ar.idx)] = (
-                    feat_tr_ev.detach().cpu().numpy().astype(np.float64, copy=False),
-                    feat_tr_gr.detach().cpu().numpy().astype(np.float64, copy=False),
-                    feat_va_ev.detach().cpu().numpy().astype(np.float64, copy=False),
-                    feat_va_gr.detach().cpu().numpy().astype(np.float64, copy=False),
+                    feat_tr_ev.detach().cpu().numpy().astype(np.float64, copy=False) if include_train else np.zeros((0,), dtype=np.float64),
+                    feat_tr_gr.detach().cpu().numpy().astype(np.float64, copy=False) if include_train else np.zeros((0,), dtype=np.float64),
+                    feat_va_ev.detach().cpu().numpy().astype(np.float64, copy=False) if include_val else np.zeros((0,), dtype=np.float64),
+                    feat_va_gr.detach().cpu().numpy().astype(np.float64, copy=False) if include_val else np.zeros((0,), dtype=np.float64),
                 )
+
+        return {
+            "train_event_masses": torch.stack(train_event_masses) if include_train else torch.zeros((0,), dtype=torch.float32, device=device),
+            "train_grid_matrix": torch.stack(train_grid_features) if include_train else torch.zeros((len(active_rules), 0), dtype=torch.float32, device=device),
+            "val_event_masses": torch.stack(val_event_masses) if include_val else torch.zeros((0,), dtype=torch.float32, device=device),
+            "val_grid_matrix": torch.stack(val_grid_features) if include_val else torch.zeros((len(active_rules), 0), dtype=torch.float32, device=device),
+            "kernel_smooth_reg": kernel_smooth_reg,
+            "heights_out": heights_out,
+            "arrays_out": arrays_out,
+        }
+
+    def as_param_maps(beta_values: torch.Tensor) -> tuple[dict[int, float], dict[int, float]]:
+        exc_params: dict[int, float] = {}
+        inh_params: dict[int, float] = {}
+        for ar, beta in zip(active_rules, beta_values.detach().cpu().numpy().tolist()):
             if ar.sign == "exc":
-                exc_event = exc_event + feat_tr_ev * coef
-                exc_grid = exc_grid + feat_tr_gr * coef
-                exc_event_va = exc_event_va + feat_va_ev * coef
-                exc_grid_va = exc_grid_va + feat_va_gr * coef
+                exc_params[int(ar.idx)] = float(beta)
             else:
-                inh_event = inh_event + feat_tr_ev * coef
-                inh_grid = inh_grid + feat_tr_gr * coef
-                inh_event_va = inh_event_va + feat_va_ev * coef
-                inh_grid_va = inh_grid_va + feat_va_gr * coef
-        return (
-            mu,
-            exc_event,
-            inh_event,
-            exc_grid,
-            inh_grid,
-            exc_event_va,
-            inh_event_va,
-            exc_grid_va,
-            inh_grid_va,
-            kernel_reg,
-            coef_out,
-            heights_out,
-            arrays_out,
-        )
+                inh_params[int(ar.idx)] = float(beta)
+        return exc_params, inh_params
+
+    beta_block_iters = max(6, min(16, int(steps) // 4 if int(steps) > 0 else 8))
+    eval_every = max(1, min(10, int(steps)))
+    min_steps_for_stop = min(max(0, int(steps) - 1), max(10, 2 * eval_every))
+    bic_tol = 1e-5
+    param_tol = 1e-4
+    patience = 2
+    stagnant_evals = 0
+    prev_eval_beta: torch.Tensor | None = None
+    prev_eval_raw: dict[tuple[object, ...], torch.Tensor] | None = None
 
     for step in range(int(steps)):
         opt.zero_grad(set_to_none=True)
-        (
-            mu,
-            exc_event,
-            inh_event,
-            exc_grid,
-            inh_grid,
-            exc_event_va,
-            inh_event_va,
-            exc_grid_va,
-            inh_grid_va,
-            kernel_reg,
-            _coef_out,
-            _heights_out,
-            _arrays_out,
-        ) = current_model(emit_numpy=False, include_val=False)
-
-        if str(intensity_model) == "canonical_loglink":
-            train_nll = -(torch.log(mu) * float(exc_event.numel()) + exc_event.sum() - inh_event.sum()) + (gw_tr * mu * torch.exp(torch.clamp(exc_grid - inh_grid, min=-40.0, max=40.0))).sum()
-        else:
-            eta_event = torch.clamp(mu + exc_event, min=1e-8)
-            eta_grid = torch.clamp(mu + exc_grid, min=1e-8)
-            train_nll = -(torch.log(eta_event) - inh_event).sum() + (gw_tr * eta_grid * torch.exp(-inh_grid)).sum()
-        if float(kernel_anchor_ridge) > 0.0:
-            train_nll = train_nll + float(kernel_anchor_ridge) * kernel_reg
+        train_state = build_feature_state(include_train=True, include_val=False, emit_numpy=False)
+        beta_fit, mu_fit, signed_event_sum, signed_grid = _solve_beta_block_canonical(
+            beta_init=beta_current,
+            sign_tensor=sign_tensor,
+            event_masses=train_state["train_event_masses"].detach(),
+            grid_matrix=train_state["train_grid_matrix"].detach(),
+            grid_weights=gw_tr,
+            num_events=tr_event_len,
+            max_iter=beta_block_iters,
+        )
+        beta_current = beta_fit.detach()
+        signed_beta_detached = (beta_current * sign_tensor).detach()
+        signed_event_sum_h = torch.dot(signed_beta_detached, train_state["train_event_masses"])
+        signed_grid_h = torch.matmul(signed_beta_detached, train_state["train_grid_matrix"])
+        train_nll, _mu_h, _exposure_h = _canonical_nll_from_signed_terms(
+            signed_event_sum=signed_event_sum_h,
+            signed_grid=signed_grid_h,
+            grid_weights=gw_tr,
+            num_events=tr_event_len,
+        )
+        if float(kernel_smoothness_ridge) > 0.0:
+            train_nll = train_nll + float(kernel_smoothness_ridge) * train_state["kernel_smooth_reg"]
         train_nll.backward()
+        prev_params = {key: param.detach().clone() for key, param in raw_heights.items()}
         opt.step()
+        project_raw_heights_(prev_params)
 
-        if step % 10 == 0 or step == int(steps) - 1:
+        if step % eval_every == 0 or step == int(steps) - 1:
             with torch.no_grad():
-                (
-                    mu_b,
-                    exc_event_b,
-                    inh_event_b,
-                    exc_grid_b,
-                    inh_grid_b,
-                    exc_event_va_b,
-                    inh_event_va_b,
-                    exc_grid_va_b,
-                    inh_grid_va_b,
-                    _kernel_reg_b,
-                    _coef_out_b,
-                    _heights_out_b,
-                    _arrays_out_b,
-                ) = current_model(emit_numpy=False)
-                if str(intensity_model) == "canonical_loglink":
-                    ll_val = (torch.log(mu_b) * float(exc_event_va_b.numel()) + exc_event_va_b.sum() - inh_event_va_b.sum()) - (gw_va * mu_b * torch.exp(torch.clamp(exc_grid_va_b - inh_grid_va_b, min=-40.0, max=40.0))).sum()
-                else:
-                    eta_ev_va = torch.clamp(mu_b + exc_event_va_b, min=1e-8)
-                    eta_gr_va = torch.clamp(mu_b + exc_grid_va_b, min=1e-8)
-                    ll_val = (torch.log(eta_ev_va) - inh_event_va_b).sum() - (gw_va * eta_gr_va * torch.exp(-inh_grid_va_b)).sum()
-                n_eff = bic_sample_size(int(bic_num_sequences) if bic_num_sequences is not None else int(exc_grid_va_b.numel()))
-                bic = float(
+                eval_state = build_feature_state(include_train=True, include_val=True, emit_numpy=False)
+            beta_eval, mu_eval, _signed_event_train, _signed_grid_train = _solve_beta_block_canonical(
+                beta_init=beta_current,
+                sign_tensor=sign_tensor,
+                event_masses=eval_state["train_event_masses"].detach(),
+                grid_matrix=eval_state["train_grid_matrix"].detach(),
+                grid_weights=gw_tr,
+                num_events=tr_event_len,
+                max_iter=beta_block_iters,
+            )
+            beta_current = beta_eval.detach()
+            signed_beta_eval = beta_current * sign_tensor
+            signed_event_val = torch.dot(signed_beta_eval, eval_state["val_event_masses"])
+            signed_grid_val = torch.matmul(signed_beta_eval, eval_state["val_grid_matrix"])
+            ll_val = (
+                torch.log(mu_eval) * float(va_event_len)
+                + signed_event_val
+                - torch.dot(gw_va, mu_eval * torch.exp(torch.clamp(signed_grid_val, min=-40.0, max=40.0)))
+            )
+            n_eff = bic_sample_size(int(bic_num_sequences) if bic_num_sequences is not None else int(va_grid_len))
+            bic = float(
                     (-2.0 * ll_val).detach().cpu().item()
                     + (
-                        float(penalty_scale) * float(model_param_dim(active_rules, subsets, int(len(knots)))) * math.log(float(n_eff))
-                        if penalize_kernel_df
-                        else float(penalty_scale) * float(1 + len(active_rules)) * math.log(float(n_eff))
-                    )
+                    float(penalty_scale) * float(model_param_dim(active_rules, subsets, int(len(knots)))) * math.log(float(n_eff))
+                    if penalize_kernel_df
+                    else float(penalty_scale) * float(1 + len(active_rules)) * math.log(float(n_eff))
                 )
-                if bic < best_bic:
-                    (
-                        mu_emit,
-                        _exc_event_emit,
-                        _inh_event_emit,
-                        _exc_grid_emit,
-                        _inh_grid_emit,
-                        _exc_event_va_emit,
-                        _inh_event_va_emit,
-                        _exc_grid_va_emit,
-                        _inh_grid_va_emit,
-                        _kernel_reg_emit,
-                        coef_out_b,
-                        heights_out_b,
-                        arrays_out_b,
-                    ) = current_model(emit_numpy=True)
-                    best_bic = bic
-                    best_state = (
-                        float(mu_emit.detach().cpu().item()),
-                        coef_out_b,
-                        heights_out_b,
-                        arrays_out_b,
-                    )
+            )
+            improved = bool(bic < best_bic - bic_tol)
+            if bic < best_bic:
+                best_bic = bic
+                best_snapshot = {
+                    "raw_heights": {key: param.detach().clone() for key, param in raw_heights.items()},
+                    "beta": beta_current.detach().clone(),
+                }
+            max_param_change = float("inf")
+            if prev_eval_beta is not None and prev_eval_raw is not None:
+                beta_change = float(torch.max(torch.abs(beta_current - prev_eval_beta)).detach().cpu().item())
+                height_change = 0.0
+                for key, param in raw_heights.items():
+                    cur_change = float(torch.max(torch.abs(param.detach() - prev_eval_raw[key])).detach().cpu().item())
+                    if cur_change > height_change:
+                        height_change = cur_change
+                max_param_change = max(beta_change, height_change)
+            prev_eval_beta = beta_current.detach().clone()
+            prev_eval_raw = {key: param.detach().clone() for key, param in raw_heights.items()}
+            if step >= int(min_steps_for_stop):
+                if improved:
+                    stagnant_evals = 0
+                elif max_param_change <= float(param_tol):
+                    stagnant_evals += 1
+                else:
+                    stagnant_evals = 0
+                if stagnant_evals >= int(patience):
+                    break
 
-    if best_state is None:
+    if best_snapshot is None:
         raise RuntimeError("Active-set optimization failed to produce a valid state")
 
-    mu_fit, coef_out, heights_out, arrays_out = best_state
-    exc_params = {int(idx): float(coef) for (idx, sign), coef in coef_out.items() if sign == "exc"}
-    inh_params = {int(idx): float(coef) for (idx, sign), coef in coef_out.items() if sign == "inh"}
-    for key, h in heights_out.items():
+    with torch.no_grad():
+        for key, param in raw_heights.items():
+            param.copy_(best_snapshot["raw_heights"][key])
+    beta_current = best_snapshot["beta"].to(device=device, dtype=torch.float32)
+
+    with torch.no_grad():
+        final_state = build_feature_state(include_train=True, include_val=True, emit_numpy=True)
+    beta_final, mu_final, _signed_event_final, _signed_grid_final = _solve_beta_block_canonical(
+        beta_init=beta_current,
+        sign_tensor=sign_tensor,
+        event_masses=final_state["train_event_masses"].detach(),
+        grid_matrix=final_state["train_grid_matrix"].detach(),
+        grid_weights=gw_tr,
+        num_events=tr_event_len,
+        max_iter=max(beta_block_iters, 12),
+    )
+    exc_params, inh_params = as_param_maps(beta_final)
+    for key, h in (final_state["heights_out"] or {}).items():
         rule_heights[key] = np.asarray(h, dtype=np.float64)
-    return best_bic, float(mu_fit), exc_params, inh_params, rule_heights, arrays_out
+    final_arrays = final_state["arrays_out"] or {}
+    final_bic = validation_bic_from_arrays(
+        active_rules=active_rules,
+        arrays_out=final_arrays,
+        exc_params=exc_params,
+        inh_params=inh_params,
+        mu=float(mu_final.detach().cpu().item()),
+        subsets=subsets,
+        num_knots=int(len(knots)),
+        grid_weights_val=grid_weights_val,
+        penalize_kernel_df=bool(penalize_kernel_df),
+        penalty_scale=float(penalty_scale),
+        num_sequences_val=bic_num_sequences,
+    )
+    return float(final_bic), float(mu_final.detach().cpu().item()), exc_params, inh_params, rule_heights, final_arrays
 
 
-def contributions_from_active(
+def _solve_beta_block_canonical_batch(
     *,
-    active_rules: list[ActiveRule],
-    arrays_out: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
-    exc_params: dict[int, float],
-    inh_params: dict[int, float],
-    tr_event_len: int,
-    tr_grid_len: int,
-):
-    exc_ev = np.zeros((tr_event_len,), dtype=np.float64)
-    inh_ev = np.zeros((tr_event_len,), dtype=np.float64)
-    exc_gr = np.zeros((tr_grid_len,), dtype=np.float64)
-    inh_gr = np.zeros((tr_grid_len,), dtype=np.float64)
-    for ar in active_rules:
-        arr = arrays_out[int(ar.idx)]
-        if ar.sign == "exc":
-            coef = float(exc_params.get(int(ar.idx), 0.0))
-            exc_ev += coef * arr[0]
-            exc_gr += coef * arr[1]
+    beta_init: torch.Tensor,
+    sign_tensor: torch.Tensor,
+    event_masses: torch.Tensor,
+    grid_matrix: torch.Tensor,
+    grid_weights: torch.Tensor,
+    num_events: int,
+    max_iter: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if int(beta_init.ndim) != 2:
+        raise ValueError("batched beta solve expects a (batch, rule) beta tensor")
+    batch_count = int(beta_init.shape[0])
+    rule_count = int(beta_init.shape[1])
+    grid_len = int(grid_matrix.shape[2]) if int(grid_matrix.ndim) == 3 else 0
+    if rule_count == 0:
+        signed_grid = torch.zeros((batch_count, grid_len), dtype=torch.float32, device=grid_matrix.device)
+        signed_event_sum = torch.zeros((batch_count,), dtype=torch.float32, device=grid_matrix.device)
+        mu, _ = _profile_mu_canonical_torch_batch(
+            signed_grid=signed_grid,
+            grid_weights=grid_weights,
+            num_events=int(num_events),
+        )
+        return beta_init.detach().clone(), mu.detach(), signed_event_sum, signed_grid
+
+    x_grid = sign_tensor.reshape(batch_count, rule_count, 1) * grid_matrix
+    signed_event_masses = sign_tensor * event_masses
+    gw = grid_weights.reshape(1, grid_len)
+    eye = torch.eye(rule_count, dtype=torch.float32, device=grid_matrix.device).reshape(1, rule_count, rule_count)
+    beta = torch.clamp(beta_init.detach().to(dtype=torch.float32), min=1e-8)
+
+    def value_grad_hess(beta_value: torch.Tensor):
+        signed_beta = beta_value * sign_tensor
+        signed_event_sum = torch.sum(signed_beta * event_masses, dim=1)
+        signed_grid = torch.einsum("br,brg->bg", signed_beta, grid_matrix)
+        expo = torch.exp(torch.clamp(signed_grid, min=-40.0, max=40.0))
+        exposure = torch.sum(expo * gw, dim=1)
+        mu = torch.clamp(
+            torch.full((batch_count,), float(num_events), dtype=torch.float32, device=grid_matrix.device)
+            / torch.clamp(exposure, min=1e-8),
+            min=1e-8,
+        )
+        nll = -(torch.log(mu) * float(num_events) + signed_event_sum) + mu * exposure
+        weights = expo * gw
+        mean_x = torch.einsum("bg,brg->br", weights, x_grid) / torch.clamp(exposure.reshape(batch_count, 1), min=1e-8)
+        second_x = torch.einsum("bg,brg,bsg->brs", weights, x_grid, x_grid) / torch.clamp(
+            exposure.reshape(batch_count, 1, 1),
+            min=1e-8,
+        )
+        grad = float(num_events) * mean_x - signed_event_masses
+        hess = float(num_events) * (
+            second_x - mean_x.reshape(batch_count, rule_count, 1) * mean_x.reshape(batch_count, 1, rule_count)
+        )
+        hess = 0.5 * (hess + torch.transpose(hess, 1, 2))
+        return nll, grad, hess, mu, signed_event_sum, signed_grid
+
+    for _iter in range(max(1, int(max_iter))):
+        nll, grad, hess, _mu, _signed_event_sum, _signed_grid = value_grad_hess(beta)
+        free = (beta > 1e-7) | (grad < -1e-6)
+        if not bool(torch.any(free)):
+            break
+        free_f = free.to(dtype=torch.float32)
+        masked_grad = grad * free_f
+        masked_hess = hess * free_f.reshape(batch_count, rule_count, 1) * free_f.reshape(batch_count, 1, rule_count)
+        masked_hess = masked_hess + eye * (1.0 - free_f).reshape(batch_count, rule_count, 1)
+        masked_hess = masked_hess + eye * 1e-5
+        try:
+            delta = -torch.linalg.solve(masked_hess, masked_grad.reshape(batch_count, rule_count, 1)).reshape(
+                batch_count,
+                rule_count,
+            )
+        except RuntimeError:
+            delta = -torch.linalg.pinv(masked_hess) @ masked_grad.reshape(batch_count, rule_count, 1)
+            delta = delta.reshape(batch_count, rule_count)
+        delta = delta * free_f
+        if float(torch.max(torch.abs(delta)).detach().cpu().item()) <= 1e-6:
+            break
+
+        neg_delta = delta < 0.0
+        feasible_ratio = torch.where(
+            neg_delta,
+            -0.99 * beta / torch.clamp(delta, max=-1e-12),
+            torch.full_like(delta, float("inf")),
+        )
+        max_step = torch.clamp(torch.amin(feasible_ratio, dim=1), max=1.0)
+        max_step = torch.where(torch.isfinite(max_step), max_step, torch.ones_like(max_step))
+        step = torch.clamp(max_step, min=1e-6, max=1.0)
+        best_beta = beta
+        accepted = torch.zeros((batch_count,), dtype=torch.bool, device=grid_matrix.device)
+        for _ls in range(12):
+            cand_beta = torch.clamp(beta + step.reshape(batch_count, 1) * delta, min=1e-8)
+            cand_nll, _cand_grad, _cand_hess, _cand_mu, _cand_event, _cand_grid = value_grad_hess(cand_beta)
+            ok = cand_nll <= nll + 1e-7
+            newly_ok = ok & (~accepted)
+            if bool(torch.any(newly_ok)):
+                best_beta = torch.where(newly_ok.reshape(batch_count, 1), cand_beta, best_beta)
+                accepted = accepted | newly_ok
+            if bool(torch.all(accepted)):
+                break
+            step = torch.where(accepted, step, step * 0.5)
+        beta_next = torch.where(accepted.reshape(batch_count, 1), best_beta, beta)
+        max_update = float(torch.max(torch.abs(beta_next - beta)).detach().cpu().item())
+        beta = beta_next.detach()
+        if max_update <= 1e-6:
+            break
+
+    _nll, grad, _hess, mu, signed_event_sum, signed_grid = value_grad_hess(beta)
+    interior = beta > 1e-5
+    kkt_residual = torch.maximum(
+        torch.max(torch.where(interior, torch.abs(grad), torch.zeros_like(grad)), dim=1).values,
+        torch.max(torch.where(interior, torch.zeros_like(grad), torch.relu(-grad)), dim=1).values,
+    )
+    fallback_rows = torch.nonzero(kkt_residual > 5e-2, as_tuple=False).reshape(-1).detach().cpu().numpy().tolist()
+    if fallback_rows:
+        beta_rows = [beta[int(row)] for row in range(batch_count)]
+        mu_rows = [mu[int(row)] for row in range(batch_count)]
+        event_rows = [signed_event_sum[int(row)] for row in range(batch_count)]
+        grid_rows = [signed_grid[int(row)] for row in range(batch_count)]
+        for row in fallback_rows:
+            row_beta, row_mu, row_event, row_grid = _solve_beta_block_canonical(
+                beta_init=beta_init[int(row)],
+                sign_tensor=sign_tensor[int(row)],
+                event_masses=event_masses[int(row)],
+                grid_matrix=grid_matrix[int(row)],
+                grid_weights=grid_weights,
+                num_events=int(num_events),
+                max_iter=int(max_iter),
+            )
+            beta_rows[int(row)] = row_beta
+            mu_rows[int(row)] = row_mu.reshape(())
+            event_rows[int(row)] = row_event.reshape(())
+            grid_rows[int(row)] = row_grid
+        beta = torch.stack(beta_rows, dim=0)
+        mu = torch.stack(mu_rows, dim=0)
+        signed_event_sum = torch.stack(event_rows, dim=0)
+        signed_grid = torch.stack(grid_rows, dim=0)
+    return beta.detach(), mu.detach(), signed_event_sum.detach(), signed_grid.detach()
+
+
+def _profile_mu_canonical_torch_batch(
+    *,
+    signed_grid: torch.Tensor,
+    grid_weights: torch.Tensor,
+    num_events: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    expo = torch.exp(torch.clamp(signed_grid, min=-40.0, max=40.0))
+    exposure = torch.sum(expo * grid_weights.reshape(1, -1), dim=1)
+    mu = torch.clamp(
+        torch.full(
+            (int(signed_grid.shape[0]),),
+            float(num_events),
+            dtype=torch.float32,
+            device=signed_grid.device,
+        )
+        / torch.clamp(exposure, min=1e-8),
+        min=1e-8,
+    )
+    return mu, exposure
+
+
+def _normalize_height_rows_torch(raw: torch.Tensor) -> torch.Tensor:
+    x = torch.clamp(raw, min=0.0)
+    peak = torch.amax(x, dim=1, keepdim=True)
+    return x / torch.clamp(peak, min=1e-8)
+
+
+def optimize_active_set_torch_batch_same_size(
+    *,
+    active_rule_lists: list[list[ActiveRule]],
+    subsets,
+    basis_cache: SourceBasisCache,
+    base_rule_heights: dict[tuple[int, int], np.ndarray],
+    template_rule_heights: dict[str, dict[tuple[int, int], np.ndarray]] | None,
+    grid_weights_train: np.ndarray,
+    grid_weights_val: np.ndarray,
+    device: torch.device,
+    torch_basis_cache: TorchBasisCache | None,
+    steps: int,
+    lr: float,
+    penalize_kernel_df: bool,
+    penalty_scale: float = 1.0,
+    bic_num_sequences: int | None = None,
+    kernel_smoothness_ridge: float = 0.0,
+    warm_start_result: SupportEvalResult | None = None,
+    score_only: bool = False,
+) -> dict[SupportKey, SupportEvalResult]:
+    if not active_rule_lists:
+        return {}
+    active_rule_lists = [
+        sort_unique_sign_exclusive_rules(list(rules))
+        for rules in active_rule_lists
+    ]
+    rule_count = int(len(active_rule_lists[0]))
+    if any(int(len(rules)) != rule_count for rules in active_rule_lists):
+        raise ValueError("batched exact refit requires equal-size support groups")
+    if rule_count == 0:
+        out: dict[SupportKey, SupportEvalResult] = {}
+        for rules in active_rule_lists:
+            bic, mu = fit_constant_bic(
+                n_events_val=int(basis_cache.val_event_times.size),
+                grid_weights_val=grid_weights_val,
+                n_events_train=int(basis_cache.train_event_times.size),
+                grid_weights_train=grid_weights_train,
+                n_val_sequences=int(bic_num_sequences if bic_num_sequences is not None else 1),
+            )
+            out[support_key_from_rules(rules)] = SupportEvalResult(
+                bic=float(bic),
+                mu=float(mu),
+                exc_params={},
+                inh_params={},
+                rule_heights=base_rule_heights,
+                arrays_out=None,
+                active_rules=[],
+            )
+        return out
+
+    if torch_basis_cache is None:
+        torch_basis_cache = TorchBasisCache(basis_cache, device)
+
+    batch_count = int(len(active_rule_lists))
+    num_knots = int(len(basis_cache.knots))
+    gw_tr = torch.as_tensor(grid_weights_train, dtype=torch.float32, device=device)
+    gw_va = torch.as_tensor(grid_weights_val, dtype=torch.float32, device=device)
+
+    first_src = int(subsets[int(active_rule_lists[0][0].idx)][0])
+    first_tr_ev, first_tr_gr, first_va_ev, first_va_gr = torch_basis_cache.arrays(first_src)
+    tr_event_len = int(first_tr_ev.num_queries)
+    tr_grid_len = int(first_tr_gr.num_queries)
+    va_event_len = int(first_va_ev.num_queries)
+    va_grid_len = int(first_va_gr.num_queries)
+    same_train_val_queries = (
+        tr_event_len == va_event_len
+        and tr_grid_len == va_grid_len
+        and np.array_equal(basis_cache.train_event_seq_ids, basis_cache.val_event_seq_ids)
+        and np.array_equal(basis_cache.train_event_times, basis_cache.val_event_times)
+        and np.array_equal(basis_cache.train_grid_seq_ids, basis_cache.val_grid_seq_ids)
+        and np.array_equal(basis_cache.train_grid_times, basis_cache.val_grid_times)
+        and np.array_equal(np.asarray(grid_weights_train), np.asarray(grid_weights_val))
+    )
+
+    init_height_maps: list[dict[tuple[int, int], np.ndarray]] = []
+    beta_init_np = np.zeros((batch_count, rule_count), dtype=np.float32)
+    sign_np = np.zeros((batch_count, rule_count), dtype=np.float32)
+    entry_support: list[int] = []
+    entry_rule_row: list[int] = []
+    entry_rule_idx: list[int] = []
+    entry_source: list[int] = []
+    entry_init_heights: list[np.ndarray] = []
+
+    for batch_row, rules in enumerate(active_rule_lists):
+        init_rule_heights, init_coef_map = _build_support_warm_start(
+            target_rules=rules,
+            subsets=subsets,
+            base_rule_heights=base_rule_heights,
+            template_rule_heights=template_rule_heights,
+            warm_start_result=warm_start_result,
+            fallback=0.1,
+        )
+        init_height_maps.append(init_rule_heights)
+        for rule_row, rule in enumerate(rules):
+            beta_init_np[int(batch_row), int(rule_row)] = max(
+                float(init_coef_map.get((int(rule.idx), str(rule.sign)), 0.1)),
+                1e-6,
+            )
+            sign_np[int(batch_row), int(rule_row)] = 1.0 if str(rule.sign) == "exc" else -1.0
+            for src in subsets[int(rule.idx)]:
+                key = (int(rule.idx), int(src))
+                entry_support.append(int(batch_row))
+                entry_rule_row.append(int(rule_row))
+                entry_rule_idx.append(int(rule.idx))
+                entry_source.append(int(src))
+                entry_init_heights.append(ensure_feasible_score_heights_numpy(init_rule_heights[key]))
+
+    raw = torch.nn.Parameter(
+        torch.as_tensor(
+            np.stack(entry_init_heights, axis=0).astype(np.float32, copy=False),
+            dtype=torch.float32,
+            device=device,
+        )
+    )
+    sign_tensor = torch.as_tensor(sign_np, dtype=torch.float32, device=device)
+    beta_current = torch.as_tensor(beta_init_np, dtype=torch.float32, device=device)
+    entry_support_tensor = torch.as_tensor(entry_support, dtype=torch.int64, device=device)
+    entry_rule_flat_tensor = torch.as_tensor(
+        [
+            int(batch_row) * int(rule_count) + int(rule_row)
+            for batch_row, rule_row in zip(entry_support, entry_rule_row)
+        ],
+        dtype=torch.int64,
+        device=device,
+    )
+    source_to_entries: dict[int, list[int]] = {}
+    for entry_id, src in enumerate(entry_source):
+        source_to_entries.setdefault(int(src), []).append(int(entry_id))
+    source_to_entry_tensors = {
+        int(src): torch.as_tensor(entry_ids, dtype=torch.int64, device=device)
+        for src, entry_ids in source_to_entries.items()
+    }
+
+    opt = torch.optim.Adam([raw], lr=float(lr))
+    beta_block_iters = max(6, min(16, int(steps) // 4 if int(steps) > 0 else 8))
+    eval_every = max(1, min(10, int(steps)))
+    min_steps_for_stop = min(max(0, int(steps) - 1), max(10, 2 * eval_every))
+    bic_tol = 1e-5
+    param_tol = 1e-4
+    patience = 2
+    best_bic = np.full((batch_count,), np.inf, dtype=np.float64)
+    best_raw = raw.detach().clone()
+    best_beta = beta_current.detach().clone()
+    prev_eval_beta: torch.Tensor | None = None
+    prev_eval_raw: torch.Tensor | None = None
+    stagnant_evals = np.zeros((batch_count,), dtype=np.int64)
+    active_support = np.ones((batch_count,), dtype=bool)
+
+    def project_raw_heights_(prev_params: torch.Tensor | None = None) -> None:
+        with torch.no_grad():
+            raw.clamp_(min=0.0)
+            peak = torch.amax(raw, dim=1, keepdim=True)
+            good = peak.squeeze(1) > 1e-8
+            if bool(torch.any(good).item()):
+                raw[good] = raw[good] / torch.clamp(peak[good], min=1e-8)
+            if bool(torch.any(~good).item()):
+                if prev_params is not None:
+                    prev = torch.clamp(prev_params[~good], min=0.0)
+                    prev_peak = torch.amax(prev, dim=1, keepdim=True)
+                    prev_good = prev_peak.squeeze(1) > 1e-8
+                    if bool(torch.any(prev_good).item()):
+                        bad_rows = torch.nonzero(~good, as_tuple=False).flatten()
+                        raw[bad_rows[prev_good]] = prev[prev_good] / torch.clamp(
+                            prev_peak[prev_good],
+                            min=1e-8,
+                        )
+                    if bool(torch.any(~prev_good).item()):
+                        bad_rows = torch.nonzero(~good, as_tuple=False).flatten()
+                        raw[bad_rows[~prev_good]].fill_(0.0)
+                        raw[bad_rows[~prev_good], 0] = 1.0
+                else:
+                    raw[~good].fill_(0.0)
+                    raw[~good, 0] = 1.0
+
+    def freeze_inactive_optimizer_rows_() -> None:
+        inactive = torch.as_tensor(~active_support, dtype=torch.bool, device=device)
+        if not bool(torch.any(inactive).item()):
+            return
+        inactive_entries = inactive[entry_support_tensor]
+        if not bool(torch.any(inactive_entries).item()):
+            return
+        with torch.no_grad():
+            raw[inactive_entries] = best_raw[inactive_entries]
+            state = opt.state.get(raw)
+            if state is not None:
+                for name in ("exp_avg", "exp_avg_sq"):
+                    buf = state.get(name)
+                    if buf is not None:
+                        buf[inactive_entries] = 0.0
+
+    def build_feature_state(
+        *,
+        emit_numpy: bool = False,
+        include_train: bool = True,
+        include_val: bool = True,
+    ):
+        reuse_train_as_val = bool(include_train and include_val and same_train_val_queries)
+        arrays_out = [dict() for _ in range(batch_count)] if emit_numpy else None
+        heights_out = [dict() for _ in range(batch_count)] if emit_numpy else None
+        smooth_by_support = torch.zeros((batch_count,), dtype=torch.float32, device=device)
+        normalized = _normalize_height_rows_torch(raw)
+        if float(kernel_smoothness_ridge) > 0.0 and int(num_knots) >= 3:
+            d2 = normalized[:, 2:] - 2.0 * normalized[:, 1:-1] + normalized[:, :-2]
+            smooth_entry = torch.sum(d2 * d2, dim=1)
+            smooth_by_support.scatter_add_(0, entry_support_tensor, smooth_entry)
+
+        flat_rule_count = int(batch_count) * int(rule_count)
+        if include_train:
+            train_event_flat = torch.ones(
+                (flat_rule_count, tr_event_len),
+                dtype=torch.float32,
+                device=device,
+            )
+            train_grid_flat = torch.ones(
+                (flat_rule_count, tr_grid_len),
+                dtype=torch.float32,
+                device=device,
+            )
         else:
-            coef = float(inh_params.get(int(ar.idx), 0.0))
-            inh_ev += coef * arr[0]
-            inh_gr += coef * arr[1]
-    return exc_ev, inh_ev, exc_gr, inh_gr
+            train_event_flat = None
+            train_grid_flat = None
+        if include_val and not reuse_train_as_val:
+            val_event_flat = torch.ones(
+                (flat_rule_count, va_event_len),
+                dtype=torch.float32,
+                device=device,
+            )
+            val_grid_flat = torch.ones(
+                (flat_rule_count, va_grid_len),
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            val_event_flat = None
+            val_grid_flat = None
+
+        def scatter_prod(dest: torch.Tensor, rows: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
+            if int(values.numel()) == 0:
+                return dest
+            index = rows.reshape(-1, 1).expand(-1, int(values.shape[1]))
+            return dest.scatter_reduce(0, index, values, reduce="prod", include_self=True)
+
+        for src, entry_tensor in source_to_entry_tensors.items():
+            h_batch = normalized[entry_tensor]
+            if heights_out is not None:
+                for local_pos, entry_id in enumerate(entry_tensor.detach().cpu().numpy().tolist()):
+                    batch_row = int(entry_support[int(entry_id)])
+                    key = (int(entry_rule_idx[int(entry_id)]), int(entry_source[int(entry_id)]))
+                    if key not in heights_out[batch_row]:
+                        heights_out[batch_row][key] = h_batch[int(local_pos)].detach().cpu().numpy().astype(
+                            np.float64,
+                            copy=True,
+                        )
+            flat_rows = entry_rule_flat_tensor[entry_tensor]
+            if include_train and include_val and reuse_train_as_val:
+                combined, sizes = torch_basis_cache.combined_arrays(int(src), ("tr_ev", "tr_gr"))
+                z_all = witness_response_torch_batched(combined, h_batch)
+                n_tr_ev, n_tr_gr = sizes
+                train_event_flat = scatter_prod(train_event_flat, flat_rows, z_all[:, : int(n_tr_ev)])
+                train_grid_flat = scatter_prod(
+                    train_grid_flat,
+                    flat_rows,
+                    z_all[:, int(n_tr_ev): int(n_tr_ev) + int(n_tr_gr)],
+                )
+            elif include_train and include_val:
+                combined, sizes = torch_basis_cache.combined_arrays(int(src), ("tr_ev", "tr_gr", "va_ev", "va_gr"))
+                z_all = witness_response_torch_batched(combined, h_batch)
+                n_tr_ev, n_tr_gr, n_va_ev, _n_va_gr = sizes
+                cut0 = n_tr_ev
+                cut1 = cut0 + n_tr_gr
+                cut2 = cut1 + n_va_ev
+                train_event_flat = scatter_prod(train_event_flat, flat_rows, z_all[:, :cut0])
+                train_grid_flat = scatter_prod(train_grid_flat, flat_rows, z_all[:, cut0:cut1])
+                val_event_flat = scatter_prod(val_event_flat, flat_rows, z_all[:, cut1:cut2])
+                val_grid_flat = scatter_prod(val_grid_flat, flat_rows, z_all[:, cut2:])
+            elif include_train:
+                combined, sizes = torch_basis_cache.combined_arrays(int(src), ("tr_ev", "tr_gr"))
+                z_all = witness_response_torch_batched(combined, h_batch)
+                n_tr_ev, n_tr_gr = sizes
+                train_event_flat = scatter_prod(train_event_flat, flat_rows, z_all[:, : int(n_tr_ev)])
+                train_grid_flat = scatter_prod(
+                    train_grid_flat,
+                    flat_rows,
+                    z_all[:, int(n_tr_ev): int(n_tr_ev) + int(n_tr_gr)],
+                )
+            elif include_val:
+                combined, sizes = torch_basis_cache.combined_arrays(int(src), ("va_ev", "va_gr"))
+                z_all = witness_response_torch_batched(combined, h_batch)
+                n_va_ev, n_va_gr = sizes
+                val_event_flat = scatter_prod(val_event_flat, flat_rows, z_all[:, : int(n_va_ev)])
+                val_grid_flat = scatter_prod(
+                    val_grid_flat,
+                    flat_rows,
+                    z_all[:, int(n_va_ev): int(n_va_ev) + int(n_va_gr)],
+                )
+
+        if include_train:
+            train_event_features = train_event_flat.view(batch_count, rule_count, tr_event_len)
+            train_grid_features = train_grid_flat.view(batch_count, rule_count, tr_grid_len)
+            train_event_masses = torch.sum(train_event_features, dim=2)
+        else:
+            train_event_features = None
+            train_grid_features = None
+            train_event_masses = torch.zeros((batch_count, rule_count), dtype=torch.float32, device=device)
+        if include_val and reuse_train_as_val:
+            val_event_features = train_event_features
+            val_grid_features = train_grid_features
+            val_event_masses = train_event_masses
+        elif include_val:
+            val_event_features = val_event_flat.view(batch_count, rule_count, va_event_len)
+            val_grid_features = val_grid_flat.view(batch_count, rule_count, va_grid_len)
+            val_event_masses = torch.sum(val_event_features, dim=2)
+        else:
+            val_event_features = None
+            val_grid_features = None
+            val_event_masses = torch.zeros((batch_count, rule_count), dtype=torch.float32, device=device)
+
+        if arrays_out is not None:
+            for b, rules in enumerate(active_rule_lists):
+                for r, rule in enumerate(rules):
+                    arrays_out[b][int(rule.idx)] = (
+                        train_event_features[int(b), int(r)].detach().cpu().numpy().astype(np.float64, copy=False)
+                        if include_train
+                        else np.zeros((0,), dtype=np.float64),
+                        train_grid_features[int(b), int(r)].detach().cpu().numpy().astype(np.float64, copy=False)
+                        if include_train
+                        else np.zeros((0,), dtype=np.float64),
+                        val_event_features[int(b), int(r)].detach().cpu().numpy().astype(np.float64, copy=False)
+                        if include_val
+                        else np.zeros((0,), dtype=np.float64),
+                        val_grid_features[int(b), int(r)].detach().cpu().numpy().astype(np.float64, copy=False)
+                        if include_val
+                        else np.zeros((0,), dtype=np.float64),
+                    )
+
+        return {
+            "train_event_masses": train_event_masses,
+            "train_grid_matrix": train_grid_features
+            if include_train
+            else torch.zeros((batch_count, rule_count, 0), dtype=torch.float32, device=device),
+            "val_event_masses": val_event_masses,
+            "val_grid_matrix": val_grid_features
+            if include_val
+            else torch.zeros((batch_count, rule_count, 0), dtype=torch.float32, device=device),
+            "kernel_smooth_reg": smooth_by_support,
+            "heights_out": heights_out,
+            "arrays_out": arrays_out,
+        }
+
+    for step in range(int(steps)):
+        if not bool(np.any(active_support)):
+            break
+        opt.zero_grad(set_to_none=True)
+        train_state = build_feature_state(include_train=True, include_val=False, emit_numpy=False)
+        beta_fit, _mu_fit, _signed_event_sum, _signed_grid = _solve_beta_block_canonical_batch(
+            beta_init=beta_current,
+            sign_tensor=sign_tensor,
+            event_masses=train_state["train_event_masses"].detach(),
+            grid_matrix=train_state["train_grid_matrix"].detach(),
+            grid_weights=gw_tr,
+            num_events=tr_event_len,
+            max_iter=beta_block_iters,
+        )
+        beta_current = beta_fit.detach()
+        signed_beta = (beta_current * sign_tensor).detach()
+        signed_event_sum = torch.sum(signed_beta * train_state["train_event_masses"], dim=1)
+        signed_grid = torch.einsum("br,brg->bg", signed_beta, train_state["train_grid_matrix"])
+        mu_train, exposure_train = _profile_mu_canonical_torch_batch(
+            signed_grid=signed_grid,
+            grid_weights=gw_tr,
+            num_events=tr_event_len,
+        )
+        train_nll = -(torch.log(mu_train) * float(tr_event_len) + signed_event_sum) + mu_train * exposure_train
+        active_mask = torch.as_tensor(active_support, dtype=torch.float32, device=device)
+        loss_by_support = train_nll
+        if float(kernel_smoothness_ridge) > 0.0:
+            loss_by_support = loss_by_support + float(kernel_smoothness_ridge) * train_state["kernel_smooth_reg"]
+        loss = torch.sum(loss_by_support * active_mask)
+        loss.backward()
+        prev_params = raw.detach().clone()
+        opt.step()
+        project_raw_heights_(prev_params)
+        freeze_inactive_optimizer_rows_()
+
+        if step % eval_every == 0 or step == int(steps) - 1:
+            with torch.no_grad():
+                eval_state = build_feature_state(include_train=True, include_val=True, emit_numpy=False)
+            beta_eval, mu_eval, _signed_event_train, _signed_grid_train = _solve_beta_block_canonical_batch(
+                beta_init=beta_current,
+                sign_tensor=sign_tensor,
+                event_masses=eval_state["train_event_masses"].detach(),
+                grid_matrix=eval_state["train_grid_matrix"].detach(),
+                grid_weights=gw_tr,
+                num_events=tr_event_len,
+                max_iter=beta_block_iters,
+            )
+            beta_current = beta_eval.detach()
+            signed_beta_eval = beta_current * sign_tensor
+            signed_event_val = torch.sum(signed_beta_eval * eval_state["val_event_masses"], dim=1)
+            signed_grid_val = torch.einsum("br,brg->bg", signed_beta_eval, eval_state["val_grid_matrix"])
+            exposure_val = torch.sum(
+                torch.exp(torch.clamp(signed_grid_val, min=-40.0, max=40.0)) * gw_va.reshape(1, -1),
+                dim=1,
+            )
+            ll_val = torch.log(mu_eval) * float(va_event_len) + signed_event_val - mu_eval * exposure_val
+            n_eff = bic_sample_size(int(bic_num_sequences) if bic_num_sequences is not None else int(va_grid_len))
+            dim_values = torch.as_tensor(
+                [
+                    float(model_param_dim(rules, subsets, int(num_knots)))
+                    if bool(penalize_kernel_df)
+                    else float(1 + len(rules))
+                    for rules in active_rule_lists
+                ],
+                dtype=torch.float32,
+                device=device,
+            )
+            bic_values_t = -2.0 * ll_val + float(penalty_scale) * dim_values * math.log(float(n_eff))
+            bic_values = bic_values_t.detach().cpu().numpy().astype(np.float64, copy=False)
+            improved = (bic_values < best_bic - bic_tol) | np.isinf(best_bic)
+            if bool(np.any(improved)):
+                improved_support = torch.as_tensor(improved, dtype=torch.bool, device=device)
+                improved_entries = improved_support[entry_support_tensor]
+                best_raw[improved_entries] = raw.detach()[improved_entries]
+                best_beta[improved_support] = beta_current.detach()[improved_support]
+                best_bic[improved] = bic_values[improved]
+
+            max_param_change = np.full((batch_count,), np.inf, dtype=np.float64)
+            if prev_eval_beta is not None and prev_eval_raw is not None:
+                beta_change = torch.max(torch.abs(beta_current - prev_eval_beta), dim=1).values.detach().cpu().numpy()
+                entry_change = torch.max(torch.abs(raw.detach() - prev_eval_raw), dim=1).values.detach().cpu().numpy()
+                height_change = np.zeros((batch_count,), dtype=np.float64)
+                for entry_id, batch_row in enumerate(entry_support):
+                    height_change[int(batch_row)] = max(
+                        float(height_change[int(batch_row)]),
+                        float(entry_change[int(entry_id)]),
+                    )
+                max_param_change = np.maximum(beta_change.astype(np.float64), height_change)
+            prev_eval_beta = beta_current.detach().clone()
+            prev_eval_raw = raw.detach().clone()
+
+            if step >= int(min_steps_for_stop):
+                for batch_row in range(batch_count):
+                    if not bool(active_support[int(batch_row)]):
+                        continue
+                    if bool(improved[int(batch_row)]):
+                        stagnant_evals[int(batch_row)] = 0
+                    elif float(max_param_change[int(batch_row)]) <= float(param_tol):
+                        stagnant_evals[int(batch_row)] += 1
+                    else:
+                        stagnant_evals[int(batch_row)] = 0
+                    if int(stagnant_evals[int(batch_row)]) >= int(patience):
+                        active_support[int(batch_row)] = False
+                freeze_inactive_optimizer_rows_()
+
+    if np.any(np.isinf(best_bic)):
+        raise RuntimeError("Batched active-set optimization failed to produce a valid state")
+
+    with torch.no_grad():
+        raw.copy_(best_raw)
+    beta_current = best_beta.to(device=device, dtype=torch.float32)
+    with torch.no_grad():
+        final_state = build_feature_state(include_train=True, include_val=True, emit_numpy=not bool(score_only))
+    beta_final, mu_final, _signed_event_final, _signed_grid_final = _solve_beta_block_canonical_batch(
+        beta_init=beta_current,
+        sign_tensor=sign_tensor,
+        event_masses=final_state["train_event_masses"].detach(),
+        grid_matrix=final_state["train_grid_matrix"].detach(),
+        grid_weights=gw_tr,
+        num_events=tr_event_len,
+        max_iter=max(beta_block_iters, 12),
+    )
+    signed_beta_final = (beta_final * sign_tensor).to(dtype=torch.float64)
+    mu_final_d = mu_final.to(dtype=torch.float64)
+    gw_va_d = torch.as_tensor(grid_weights_val, dtype=torch.float64, device=device)
+    signed_event_val = torch.sum(signed_beta_final * final_state["val_event_masses"].to(dtype=torch.float64), dim=1)
+    signed_grid_val = torch.einsum(
+        "br,brg->bg",
+        signed_beta_final,
+        final_state["val_grid_matrix"].to(dtype=torch.float64),
+    )
+    exposure_val = torch.sum(
+        torch.exp(torch.clamp(signed_grid_val, min=-40.0, max=40.0)) * gw_va_d.reshape(1, -1),
+        dim=1,
+    )
+    ll_val = torch.log(torch.clamp(mu_final_d, min=1e-8)) * float(va_event_len) + signed_event_val - mu_final_d * exposure_val
+    n_eff = bic_sample_size(int(bic_num_sequences) if bic_num_sequences is not None else int(va_grid_len))
+    dim_values = torch.as_tensor(
+        [
+            float(model_param_dim(rules, subsets, int(num_knots)))
+            if bool(penalize_kernel_df)
+            else float(1 + len(rules))
+            for rules in active_rule_lists
+        ],
+        dtype=torch.float64,
+        device=device,
+    )
+    final_bic_values = (
+        -2.0 * ll_val + float(penalty_scale) * dim_values * math.log(float(n_eff))
+    ).detach().cpu().numpy().astype(np.float64, copy=False)
+    score_only_heights_by_row: list[dict[tuple[int, int], np.ndarray]] | None = None
+    if bool(score_only):
+        normalized_np = _normalize_height_rows_torch(raw).detach().cpu().numpy().astype(np.float64, copy=False)
+        score_only_heights_by_row = [dict(base_rule_heights) for _ in range(batch_count)]
+        for entry_id, batch_row in enumerate(entry_support):
+            key = (int(entry_rule_idx[int(entry_id)]), int(entry_source[int(entry_id)]))
+            score_only_heights_by_row[int(batch_row)][key] = normalized_np[int(entry_id)].copy()
+
+    out: dict[SupportKey, SupportEvalResult] = {}
+    for batch_row, rules in enumerate(active_rule_lists):
+        exc_params: dict[int, float] = {}
+        inh_params: dict[int, float] = {}
+        for rule_row, rule in enumerate(rules):
+            beta_val = float(beta_final[int(batch_row), int(rule_row)].detach().cpu().item())
+            if str(rule.sign) == "exc":
+                exc_params[int(rule.idx)] = beta_val
+            else:
+                inh_params[int(rule.idx)] = beta_val
+        if bool(score_only):
+            if score_only_heights_by_row is None:
+                raise RuntimeError("score-only refit did not materialize optimized kernel heights")
+            trial_heights = score_only_heights_by_row[int(batch_row)]
+            arrays_fit = None
+        else:
+            trial_heights = dict(base_rule_heights)
+            for key, h in (final_state["heights_out"][int(batch_row)] or {}).items():
+                trial_heights[key] = np.asarray(h, dtype=np.float64)
+            arrays_fit = final_state["arrays_out"][int(batch_row)] or {}
+        out[support_key_from_rules(rules)] = SupportEvalResult(
+            bic=float(final_bic_values[int(batch_row)]),
+            mu=float(mu_final[int(batch_row)].detach().cpu().item()),
+            exc_params=exc_params,
+            inh_params=inh_params,
+            rule_heights=trial_heights,
+            arrays_out=arrays_fit,
+            active_rules=list(rules),
+        )
+    return out
 
 
 def fit_constant_bic(
@@ -734,33 +1651,6 @@ def fit_constant_bic(
     return float(bic), float(mu)
 
 
-def maximal_nested_families(active_rules: list[ActiveRule], subsets) -> list[list[ActiveRule]]:
-    rules = list(active_rules)
-    maximal: list[tuple[int, ...]] = []
-    for ar in rules:
-        subset = tuple(int(s) for s in subsets[int(ar.idx)])
-        if any(set(subset).issubset(set(subsets[int(other.idx)])) and len(tuple(subsets[int(other.idx)])) > len(subset) for other in rules):
-            continue
-        maximal.append(subset)
-    families: list[list[ActiveRule]] = []
-    seen: set[tuple[int, ...]] = set()
-    for max_subset in maximal:
-        family = [
-            ar
-            for ar in rules
-            if set(tuple(int(s) for s in subsets[int(ar.idx)])).issubset(set(max_subset))
-        ]
-        sizes = {len(tuple(subsets[int(ar.idx)])) for ar in family}
-        if len(family) < 2 or len(sizes) < 2:
-            continue
-        key = tuple(sorted(int(ar.idx) for ar in family))
-        if key in seen:
-            continue
-        seen.add(key)
-        families.append(family)
-    return families
-
-
 def validation_bic_from_arrays(
     *,
     active_rules: list[ActiveRule],
@@ -774,7 +1664,6 @@ def validation_bic_from_arrays(
     penalize_kernel_df: bool,
     penalty_scale: float = 1.0,
     num_sequences_val: int | None = None,
-    intensity_model: str = "multiplicative",
 ) -> float:
     if not active_rules:
         raise ValueError("validation_bic_from_arrays requires a non-empty active_rules list")
@@ -794,12 +1683,12 @@ def validation_bic_from_arrays(
             coef = float(inh_params.get(int(ar.idx), 0.0))
             inh_ev += coef * arr[2]
             inh_gr += coef * arr[3]
-    if str(intensity_model) == "canonical_loglink":
-        ll_val = float(va_event_len * math.log(max(float(mu), 1e-8)) + np.sum(exc_ev) - np.sum(inh_ev) - np.dot(grid_weights_val, float(mu) * np.exp(np.clip(exc_gr - inh_gr, -40.0, 40.0))))
-    else:
-        eta_ev = np.clip(float(mu) + exc_ev, 1e-8, None)
-        eta_gr = np.clip(float(mu) + exc_gr, 1e-8, None)
-        ll_val = float(np.sum(np.log(eta_ev) - inh_ev) - np.dot(grid_weights_val, eta_gr * np.exp(-inh_gr)))
+    ll_val = float(
+        va_event_len * math.log(max(float(mu), 1e-8))
+        + np.sum(exc_ev)
+        - np.sum(inh_ev)
+        - np.dot(grid_weights_val, float(mu) * np.exp(np.clip(exc_gr - inh_gr, -40.0, 40.0)))
+    )
     n_eff = bic_sample_size(int(num_sequences_val) if num_sequences_val is not None else int(grid_weights_val.size))
     return float(
         -2.0 * ll_val
@@ -811,416 +1700,13 @@ def validation_bic_from_arrays(
     )
 
 
-def build_init_coef_map(
-    active_rules: list[ActiveRule],
-    exc_params: dict[int, float],
-    inh_params: dict[int, float],
-    fallback: float = 0.1,
-) -> dict[tuple[int, str], float]:
-    out: dict[tuple[int, str], float] = {}
-    for ar in active_rules:
-        if ar.sign == "exc":
-            out[(int(ar.idx), "exc")] = float(exc_params.get(int(ar.idx), fallback))
-        else:
-            out[(int(ar.idx), "inh")] = float(inh_params.get(int(ar.idx), fallback))
-    return out
-
-
-def family_attribution_refine(
+def evaluate_support_exact(
     *,
     active_rules: list[ActiveRule],
     subsets,
     basis_cache: SourceBasisCache,
-    rule_heights: dict[tuple[int, int], np.ndarray],
-    mu: float,
-    exc_params: dict[int, float],
-    inh_params: dict[int, float],
-    grid_weights_train: np.ndarray,
-    grid_weights_val: np.ndarray,
-    device: torch.device,
-    torch_basis_cache: TorchBasisCache | None = None,
-    opt_steps: int,
-    lr: float,
-    passes: int,
-    penalize_kernel_df: bool = False,
-    num_val_sequences: int | None = None,
-    intensity_model: str = "multiplicative",
-    kernel_anchor_heights: dict[tuple[int, int], np.ndarray] | None = None,
-    kernel_anchor_ridge: float = 0.0,
-    kernel_tie_mode: str = "none",
-    return_arrays: bool = False,
-):
-    if not active_rules or int(passes) <= 0:
-        if bool(return_arrays):
-            return float("inf"), float(mu), exc_params, inh_params, rule_heights, active_rules, {}
-        return float("inf"), float(mu), exc_params, inh_params, rule_heights, active_rules
-
-    knots = np.asarray(basis_cache.knots, dtype=np.float64)
-    area_weights = trapz_area_weights(knots)
-    families = maximal_nested_families(active_rules, subsets)
-    if not families:
-        init_coef_map = build_init_coef_map(active_rules, exc_params, inh_params, fallback=0.1)
-        bic, mu_fit, exc_fit, inh_fit, rule_heights, _ = optimize_active_set_torch(
-            active_rules=active_rules,
-            subsets=subsets,
-            basis_cache=basis_cache,
-            rule_heights=rule_heights,
-            init_mu=mu,
-            init_coef_map=init_coef_map,
-            grid_weights_train=grid_weights_train,
-            grid_weights_val=grid_weights_val,
-            device=device,
-            torch_basis_cache=torch_basis_cache,
-            steps=max(40, int(opt_steps)),
-            lr=lr,
-            penalize_kernel_df=bool(penalize_kernel_df),
-            bic_num_sequences=num_val_sequences,
-            intensity_model=str(intensity_model),
-            kernel_anchor_heights=kernel_anchor_heights,
-            kernel_anchor_ridge=float(kernel_anchor_ridge),
-            kernel_tie_mode=str(kernel_tie_mode),
-        )
-        if bool(return_arrays):
-            return bic, float(mu_fit), exc_fit, inh_fit, rule_heights, active_rules, _
-        return bic, float(mu_fit), exc_fit, inh_fit, rule_heights, active_rules
-
-    cur_mu = float(mu)
-    cur_exc = dict(exc_params)
-    cur_inh = dict(inh_params)
-    cur_rules = list(active_rules)
-    cur_heights = rule_heights
-    best_bic = float("inf")
-
-    for _ in range(int(passes)):
-        init_coef_map = build_init_coef_map(cur_rules, cur_exc, cur_inh, fallback=0.1)
-        best_bic, mu_fit, exc_fit, inh_fit, cur_heights, arrays_out = optimize_active_set_torch(
-            active_rules=cur_rules,
-            subsets=subsets,
-            basis_cache=basis_cache,
-            rule_heights=cur_heights,
-            init_mu=cur_mu,
-            init_coef_map=init_coef_map,
-            grid_weights_train=grid_weights_train,
-            grid_weights_val=grid_weights_val,
-            device=device,
-            torch_basis_cache=torch_basis_cache,
-            steps=max(40, int(opt_steps) // 2),
-            lr=lr,
-            penalize_kernel_df=bool(penalize_kernel_df),
-            bic_num_sequences=num_val_sequences,
-            intensity_model=str(intensity_model),
-            kernel_anchor_heights=kernel_anchor_heights,
-            kernel_anchor_ridge=float(kernel_anchor_ridge),
-            kernel_tie_mode=str(kernel_tie_mode),
-        )
-        cur_mu = float(mu_fit)
-        cur_exc = dict(exc_fit)
-        cur_inh = dict(inh_fit)
-
-        exc_ev, inh_ev, exc_gr, inh_gr = contributions_from_active(
-            active_rules=cur_rules,
-            arrays_out=arrays_out,
-            exc_params=cur_exc,
-            inh_params=cur_inh,
-            tr_event_len=int(next(iter(arrays_out.values()))[0].size),
-            tr_grid_len=int(next(iter(arrays_out.values()))[1].size),
-        )
-        if str(intensity_model) == "canonical_loglink":
-            lam_ev = float(cur_mu) * np.exp(np.clip(exc_ev - inh_ev, -40.0, 40.0))
-            lam_gr = float(cur_mu) * np.exp(np.clip(exc_gr - inh_gr, -40.0, 40.0))
-        else:
-            eta_ev = np.clip(float(cur_mu) + exc_ev, 1e-8, None)
-            eta_gr = np.clip(float(cur_mu) + exc_gr, 1e-8, None)
-            lam_gr = eta_gr * np.exp(-inh_gr)
-
-        stat_sum: dict[tuple[int, int], np.ndarray] = {}
-        stat_count: dict[tuple[int, int], float] = {}
-
-        for family in families:
-            family_inh = [ar for ar in family if ar.sign == "inh"]
-            fam_inh_gr = None
-            if family_inh:
-                fam_inh_gr = np.zeros_like(next(iter(arrays_out.values()))[1], dtype=np.float64)
-                for ar in family_inh:
-                    fam_inh_gr += float(cur_inh.get(int(ar.idx), 0.0)) * arrays_out[int(ar.idx)][1]
-                fam_inh_gr = np.clip(fam_inh_gr, 1e-8, None)
-
-            for ar in family:
-                subset = tuple(int(s) for s in subsets[int(ar.idx)])
-                if ar.sign == "exc":
-                    coef = float(cur_exc.get(int(ar.idx), 0.0))
-                    if coef <= 1e-10:
-                        continue
-                    if str(intensity_model) == "canonical_loglink":
-                        # In the log-link model, excitation enters linearly in the
-                        # event log-likelihood term, so event-side attribution should
-                        # follow the rule's direct event contribution rather than the
-                        # multiplicative-model rate share.
-                        weights = coef * arrays_out[int(ar.idx)][0]
-                    else:
-                        weights = coef * arrays_out[int(ar.idx)][0] / eta_ev
-                    if float(np.sum(weights)) <= 1e-10:
-                        continue
-                    for src in subset:
-                        b_tr_ev, _, _, _ = basis_cache.arrays(int(src))
-                        stat = np.asarray(weights @ b_tr_ev, dtype=np.float64)
-                        key = (int(ar.idx), int(src))
-                        stat_sum[key] = stat if key not in stat_sum else stat_sum[key] + stat
-                        stat_count[key] = stat_count.get(key, 0.0) + 1.0
-                else:
-                    coef = float(cur_inh.get(int(ar.idx), 0.0))
-                    if coef <= 1e-10 or fam_inh_gr is None:
-                        continue
-                    share = coef * arrays_out[int(ar.idx)][1] / fam_inh_gr
-                    weights = np.asarray(grid_weights_train, dtype=np.float64) * lam_gr * share
-                    if float(np.sum(weights)) <= 1e-10:
-                        continue
-                    for src in subset:
-                        _, b_tr_gr, _, _ = basis_cache.arrays(int(src))
-                        stat = np.asarray(weights @ b_tr_gr, dtype=np.float64)
-                        key = (int(ar.idx), int(src))
-                        stat_sum[key] = stat if key not in stat_sum else stat_sum[key] + stat
-                        stat_count[key] = stat_count.get(key, 0.0) + 1.0
-
-        for key, stat in stat_sum.items():
-            avg = stat / max(float(stat_count.get(key, 1.0)), 1.0)
-            if float(np.sum(avg)) <= 1e-12:
-                continue
-            cur_heights[key] = normalize_piecewise_area(knots, np.maximum(avg, 0.0))
-
-    init_coef_map = build_init_coef_map(cur_rules, cur_exc, cur_inh, fallback=0.1)
-    best_bic, mu_fit, exc_fit, inh_fit, cur_heights, arrays_out = optimize_active_set_torch(
-        active_rules=cur_rules,
-        subsets=subsets,
-        basis_cache=basis_cache,
-        rule_heights=cur_heights,
-        init_mu=cur_mu,
-        init_coef_map=init_coef_map,
-        grid_weights_train=grid_weights_train,
-        grid_weights_val=grid_weights_val,
-        device=device,
-        torch_basis_cache=torch_basis_cache,
-        steps=max(60, int(opt_steps)),
-        lr=lr,
-        penalize_kernel_df=bool(penalize_kernel_df),
-        bic_num_sequences=num_val_sequences,
-        intensity_model=str(intensity_model),
-        kernel_anchor_heights=kernel_anchor_heights,
-        kernel_anchor_ridge=float(kernel_anchor_ridge),
-        kernel_tie_mode=str(kernel_tie_mode),
-    )
-    if bool(return_arrays):
-        return best_bic, float(mu_fit), exc_fit, inh_fit, cur_heights, cur_rules, arrays_out
-    return best_bic, float(mu_fit), exc_fit, inh_fit, cur_heights, cur_rules
-
-
-
-
-def run_active_set(
-    *,
-    subsets,
-    init_arrays,
-    score_arrays=None,
-    rule_heights,
-    basis_cache,
-    grid_weights_train,
-    grid_weights_val,
-    max_rules,
-    opt_steps,
-    lr,
-    device,
-    torch_basis_cache: TorchBasisCache | None = None,
-    penalize_kernel_df,
-    num_val_sequences: int,
-    intensity_model: str = "multiplicative",
-):
-    n_events_train = int(next(iter(init_arrays.values()))[0].size)
-    n_grid_train = int(next(iter(init_arrays.values()))[1].size)
-    n_events_val = int(next(iter(init_arrays.values()))[2].size)
-    base_bic, mu = fit_constant_bic(
-        n_events_val=n_events_val,
-        grid_weights_val=grid_weights_val,
-        n_events_train=n_events_train,
-        grid_weights_train=grid_weights_train,
-        n_val_sequences=int(num_val_sequences),
-    )
-    active_rules: list[ActiveRule] = []
-    exc_params: dict[int, float] = {}
-    inh_params: dict[int, float] = {}
-    arrays_active: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
-    best_bic = base_bic
-    while len(active_rules) < int(max_rules):
-        exc_ev, inh_ev, exc_gr, inh_gr = contributions_from_active(
-            active_rules=active_rules,
-            arrays_out=arrays_active,
-            exc_params=exc_params,
-            inh_params=inh_params,
-            tr_event_len=n_events_train,
-            tr_grid_len=n_grid_train,
-        ) if active_rules else (
-            np.zeros((n_events_train,), dtype=np.float64),
-            np.zeros((n_events_train,), dtype=np.float64),
-            np.zeros((n_grid_train,), dtype=np.float64),
-            np.zeros((n_grid_train,), dtype=np.float64),
-        )
-
-        active_idx_set = {int(ar.idx) for ar in active_rules}
-        stale_trials = []
-        if score_arrays is None:
-            score_arrays = init_arrays
-
-        for idx, arr in init_arrays.items():
-            if int(idx) in active_idx_set:
-                continue
-            score_arr = score_arrays.get(int(idx), arr)
-            candidate_penalty = (
-                0.5 * float(rule_param_dim(subsets[int(idx)], basis_cache.knots.size)) * math.log(float(bic_sample_size(int(num_val_sequences))))
-                if penalize_kernel_df
-                else 0.5 * math.log(float(bic_sample_size(int(num_val_sequences))))
-            )
-            gain, sign, coef0 = rule_score(
-                feat_event=score_arr[0],
-                feat_grid=score_arr[1],
-                mu=mu,
-                exc_event=exc_ev,
-                inh_event=inh_ev,
-                exc_grid=exc_gr,
-                inh_grid=inh_gr,
-                grid_weights_train=grid_weights_train,
-                penalty=candidate_penalty,
-                intensity_model=str(intensity_model),
-            )
-            stale_trials.append((float(gain), int(idx), str(sign), float(coef0)))
-
-        if not stale_trials:
-            break
-
-        stale_trials.sort(key=lambda x: x[0], reverse=True)
-        best_trial = max(stale_trials, key=lambda x: x[0])
-        if best_trial[0] <= 1e-8:
-            break
-
-        _, idx_add, sign_add, coef0 = best_trial
-        trial_active = active_rules + [ActiveRule(idx=int(idx_add), sign=str(sign_add))]
-        init_coef_map = build_init_coef_map(trial_active, exc_params, inh_params, fallback=float(coef0))
-        init_coef_map[(int(idx_add), str(sign_add))] = float(coef0)
-        bic, mu_fit, exc_fit, inh_fit, rule_heights, arrays_fit = optimize_active_set_torch(
-            active_rules=trial_active,
-            subsets=subsets,
-            basis_cache=basis_cache,
-            rule_heights=rule_heights,
-            init_mu=mu,
-            init_coef_map=init_coef_map,
-            grid_weights_train=grid_weights_train,
-            grid_weights_val=grid_weights_val,
-            device=device,
-            torch_basis_cache=torch_basis_cache,
-            steps=opt_steps,
-            lr=lr,
-            penalize_kernel_df=bool(penalize_kernel_df),
-            bic_num_sequences=int(num_val_sequences),
-            intensity_model=str(intensity_model),
-        )
-        if float(bic) + 1e-8 < best_bic:
-            best_bic = float(bic)
-            mu = float(mu_fit)
-            active_rules = trial_active
-            exc_params = exc_fit
-            inh_params = inh_fit
-            arrays_active = arrays_fit
-            continue
-        break
-
-    improved = True
-    while improved and active_rules:
-        improved = False
-        for j in range(len(active_rules)):
-            trial_active = active_rules[:j] + active_rules[j + 1 :]
-            if not trial_active:
-                trial_bic, trial_mu = fit_constant_bic(
-                    n_events_val=n_events_val,
-                    grid_weights_val=grid_weights_val,
-                    n_events_train=n_events_train,
-                    grid_weights_train=grid_weights_train,
-                    n_val_sequences=int(num_val_sequences),
-                )
-                if float(trial_bic) + 1e-8 < best_bic:
-                    best_bic = float(trial_bic)
-                    mu = float(trial_mu)
-                    active_rules = []
-                    exc_params = {}
-                    inh_params = {}
-                    arrays_active = {}
-                    improved = True
-                    break
-                continue
-            init_coef_map = build_init_coef_map(trial_active, exc_params, inh_params, fallback=0.1)
-            bic, mu_fit, exc_fit, inh_fit, rule_heights, arrays_fit = optimize_active_set_torch(
-                active_rules=trial_active,
-                subsets=subsets,
-                basis_cache=basis_cache,
-                rule_heights=rule_heights,
-                init_mu=mu,
-                init_coef_map=init_coef_map,
-                grid_weights_train=grid_weights_train,
-                grid_weights_val=grid_weights_val,
-                device=device,
-                torch_basis_cache=torch_basis_cache,
-                steps=max(40, opt_steps // 2),
-                lr=lr,
-                penalize_kernel_df=bool(penalize_kernel_df),
-                bic_num_sequences=int(num_val_sequences),
-                intensity_model=str(intensity_model),
-            )
-            if float(bic) + 1e-8 < best_bic:
-                best_bic = float(bic)
-                mu = float(mu_fit)
-                active_rules = trial_active
-                exc_params = exc_fit
-                inh_params = inh_fit
-                arrays_active = arrays_fit
-                improved = True
-                break
-    return best_bic, mu, exc_params, inh_params, rule_heights, active_rules
-
-@functools.lru_cache(maxsize=None)
-def support_partitions(support: tuple[int, ...]) -> list[tuple[tuple[int, ...], ...]]:
-    items = tuple(int(s) for s in sorted(support))
-    if not items:
-        return [tuple()]
-
-    def _rec(rest: tuple[int, ...]) -> list[list[list[int]]]:
-        if not rest:
-            return [[]]
-        head, tail = int(rest[0]), tuple(int(x) for x in rest[1:])
-        tail_parts = _rec(tail)
-        out: list[list[list[int]]] = []
-        for part in tail_parts:
-            out.append([[head]] + [list(block) for block in part])
-            for j in range(len(part)):
-                updated = [list(block) for block in part]
-                updated[j] = sorted(updated[j] + [head])
-                out.append(updated)
-        return out
-
-    unique: set[tuple[tuple[int, ...], ...]] = set()
-    for part in _rec(items):
-        canon = tuple(sorted(tuple(sorted(int(x) for x in block)) for block in part))
-        unique.add(canon)
-    return sorted(unique, key=lambda part: (len(part), part))
-
-
-def exact_seed_partition_step(
-    *,
-    seed_idx: int,
-    active_rules: list[ActiveRule],
-    subsets,
-    init_arrays,
-    basis_cache: SourceBasisCache,
-    rule_heights: dict[tuple[int, int], np.ndarray],
-    mu: float,
-    exc_params: dict[int, float],
-    inh_params: dict[int, float],
+    base_rule_heights: dict[tuple[int, int], np.ndarray],
+    template_rule_heights: dict[str, dict[tuple[int, int], np.ndarray]] | None,
     grid_weights_train: np.ndarray,
     grid_weights_val: np.ndarray,
     device: torch.device,
@@ -1228,948 +1714,228 @@ def exact_seed_partition_step(
     opt_steps: int,
     lr: float,
     penalize_kernel_df: bool,
-    num_val_sequences: int,
-    intensity_model: str,
-) -> tuple[float, float, dict[int, float], dict[int, float], dict[tuple[int, int], np.ndarray], list[ActiveRule], tuple[int, ...]]:
-    seed_support = tuple(int(s) for s in subsets[int(seed_idx)])
-    seed_set = set(seed_support)
-    subset_to_idx = {tuple(int(s) for s in subset): int(idx) for idx, subset in enumerate(subsets)}
-    inside_active = [ar for ar in active_rules if set(int(s) for s in subsets[int(ar.idx)]).issubset(seed_set)]
-    outside_active = [ar for ar in active_rules if ar not in inside_active]
-    active_signs = {int(ar.idx): str(ar.sign) for ar in active_rules}
-
-    n_events_train = int(next(iter(init_arrays.values()))[0].size)
-    n_grid_train = int(next(iter(init_arrays.values()))[1].size)
-    exc_ev, inh_ev, exc_gr, inh_gr = contributions_from_active(
-        active_rules=outside_active,
-        arrays_out={int(ar.idx): init_arrays[int(ar.idx)] for ar in outside_active},
-        exc_params=exc_params,
-        inh_params=inh_params,
-        tr_event_len=n_events_train,
-        tr_grid_len=n_grid_train,
-    ) if outside_active else (
-        np.zeros((n_events_train,), dtype=np.float64),
-        np.zeros((n_events_train,), dtype=np.float64),
-        np.zeros((n_grid_train,), dtype=np.float64),
-        np.zeros((n_grid_train,), dtype=np.float64),
-    )
-    penalty = (
-        0.5 * math.log(float(bic_sample_size(int(num_val_sequences))))
-        if not penalize_kernel_df
-        else None
-    )
-
-    block_rule_cache: dict[tuple[int, ...], ActiveRule] = {}
-    block_coef_cache: dict[tuple[int, str], float] = {}
-
-    def resolve_block_rule(block: tuple[int, ...]) -> ActiveRule:
-        block = tuple(sorted(int(s) for s in block))
-        idx = int(subset_to_idx[block])
-        if idx in active_signs:
-            sign = str(active_signs[idx])
-            coef0 = float(exc_params[idx] if sign == "exc" else inh_params[idx])
-        else:
-            arr = init_arrays[idx]
-            candidate_penalty = (
-                0.5 * float(rule_param_dim(subsets[int(idx)], basis_cache.knots.size)) * math.log(float(bic_sample_size(int(num_val_sequences))))
-                if penalize_kernel_df
-                else float(penalty)
-            )
-            _gain, sign, coef0 = rule_score(
-                feat_event=arr[0],
-                feat_grid=arr[1],
-                mu=mu,
-                exc_event=exc_ev,
-                inh_event=inh_ev,
-                exc_grid=exc_gr,
-                inh_grid=inh_gr,
-                grid_weights_train=grid_weights_train,
-                penalty=float(candidate_penalty),
-                intensity_model=str(intensity_model),
-            )
-        block_coef_cache[(idx, str(sign))] = float(coef0)
-        rule = ActiveRule(idx=idx, sign=str(sign))
-        block_rule_cache[block] = rule
-        return rule
-
-    n_events_val = int(next(iter(init_arrays.values()))[2].size)
-    if active_rules:
-        current_bic, current_mu, current_exc, current_inh, current_heights, _ = optimize_active_set_torch(
-            active_rules=active_rules,
-            subsets=subsets,
-            basis_cache=basis_cache,
-            rule_heights=rule_heights,
-            init_mu=mu,
-            init_coef_map=build_init_coef_map(active_rules, exc_params, inh_params, fallback=0.1),
-            grid_weights_train=grid_weights_train,
-            grid_weights_val=grid_weights_val,
-            device=device,
-            torch_basis_cache=torch_basis_cache,
-            steps=max(40, int(opt_steps)),
-            lr=lr,
-            penalize_kernel_df=bool(penalize_kernel_df),
-            bic_num_sequences=int(num_val_sequences),
-            intensity_model=str(intensity_model),
-        )
-        best_state = (
-            float(current_bic),
-            float(current_mu),
-            dict(current_exc),
-            dict(current_inh),
-            current_heights,
-            list(active_rules),
-        )
-    else:
-        current_bic, current_mu = fit_constant_bic(
-            n_events_val=n_events_val,
-            grid_weights_val=grid_weights_val,
-            n_events_train=n_events_train,
-            grid_weights_train=grid_weights_train,
-            n_val_sequences=int(num_val_sequences),
-        )
-        best_state = (
-            float(current_bic),
-            float(current_mu),
-            {},
-            {},
-            rule_heights,
-            [],
-        )
-
-    for partition in support_partitions(seed_support):
-        chart_rules = [resolve_block_rule(block) for block in partition]
-        cand_rules = sorted(outside_active + chart_rules, key=lambda ar: (int(ar.idx), str(ar.sign)))
-        init_coef_map = build_init_coef_map(cand_rules, exc_params, inh_params, fallback=0.1)
-        for ar in chart_rules:
-            key = (int(ar.idx), str(ar.sign))
-            if key in block_coef_cache:
-                init_coef_map[key] = float(block_coef_cache[key])
-        cand_bic, cand_mu, cand_exc, cand_inh, cand_heights, _ = optimize_active_set_torch(
-            active_rules=cand_rules,
-            subsets=subsets,
-            basis_cache=basis_cache,
-            rule_heights=rule_heights,
-            init_mu=mu,
-            init_coef_map=init_coef_map,
-            grid_weights_train=grid_weights_train,
-            grid_weights_val=grid_weights_val,
-            device=device,
-            torch_basis_cache=torch_basis_cache,
-            steps=max(30, int(opt_steps) // 2),
-            lr=lr,
-            penalize_kernel_df=bool(penalize_kernel_df),
-            bic_num_sequences=int(num_val_sequences),
-            intensity_model=str(intensity_model),
-        )
-        cand_state = (
-            float(cand_bic),
-            float(cand_mu),
-            dict(cand_exc),
-            dict(cand_inh),
-            cand_heights,
-            cand_rules,
-        )
-        if float(cand_state[0]) + 1e-8 < float(best_state[0]):
-            best_state = cand_state
-    return (*best_state, seed_support)
-
-
-def run_active_set_seed_partition(
-    *,
-    subsets,
-    init_arrays,
-    score_arrays=None,
-    rule_heights,
-    basis_cache,
-    grid_weights_train,
-    grid_weights_val,
-    max_rules,
-    opt_steps,
-    lr,
-    device,
-    torch_basis_cache: TorchBasisCache | None = None,
-    penalize_kernel_df,
-    num_val_sequences: int,
-    intensity_model: str = "multiplicative",
-):
-    n_events_train = int(next(iter(init_arrays.values()))[0].size)
-    n_grid_train = int(next(iter(init_arrays.values()))[1].size)
-    n_events_val = int(next(iter(init_arrays.values()))[2].size)
-    base_bic, mu = fit_constant_bic(
-        n_events_val=n_events_val,
-        grid_weights_val=grid_weights_val,
-        n_events_train=n_events_train,
-        grid_weights_train=grid_weights_train,
-        n_val_sequences=int(num_val_sequences),
-    )
-    active_rules: list[ActiveRule] = []
-    exc_params: dict[int, float] = {}
-    inh_params: dict[int, float] = {}
-    best_bic = float(base_bic)
-
-    while len(active_rules) < int(max_rules):
-        exc_ev, inh_ev, exc_gr, inh_gr = contributions_from_active(
-            active_rules=active_rules,
-            arrays_out={int(ar.idx): init_arrays[int(ar.idx)] for ar in active_rules},
-            exc_params=exc_params,
-            inh_params=inh_params,
-            tr_event_len=n_events_train,
-            tr_grid_len=n_grid_train,
-        ) if active_rules else (
-            np.zeros((n_events_train,), dtype=np.float64),
-            np.zeros((n_events_train,), dtype=np.float64),
-            np.zeros((n_grid_train,), dtype=np.float64),
-            np.zeros((n_grid_train,), dtype=np.float64),
-        )
-
-        active_idx_set = {int(ar.idx) for ar in active_rules}
-        stale_trials = []
-        if score_arrays is None:
-            score_arrays = init_arrays
-
-        for idx, arr in init_arrays.items():
-            if int(idx) in active_idx_set:
-                continue
-            score_arr = score_arrays.get(int(idx), arr)
-            candidate_penalty = (
-                0.5 * float(rule_param_dim(subsets[int(idx)], basis_cache.knots.size)) * math.log(float(bic_sample_size(int(num_val_sequences))))
-                if penalize_kernel_df
-                else 0.5 * math.log(float(bic_sample_size(int(num_val_sequences))))
-            )
-            gain, sign, coef0 = rule_score(
-                feat_event=score_arr[0],
-                feat_grid=score_arr[1],
-                mu=mu,
-                exc_event=exc_ev,
-                inh_event=inh_ev,
-                exc_grid=exc_gr,
-                inh_grid=inh_gr,
-                grid_weights_train=grid_weights_train,
-                penalty=candidate_penalty,
-                intensity_model=str(intensity_model),
-            )
-            stale_trials.append((float(gain), int(idx), str(sign), float(coef0)))
-
-        if not stale_trials:
-            break
-
-        stale_trials.sort(key=lambda x: x[0], reverse=True)
-        best_trial = max(stale_trials, key=lambda x: x[0])
-        if float(best_trial[0]) <= 1e-8:
-            break
-
-        _, idx_add, _sign_add, _coef0 = best_trial
-        trial_bic, trial_mu, trial_exc, trial_inh, trial_heights, trial_rules, _seed_support = exact_seed_partition_step(
-            seed_idx=int(idx_add),
-            active_rules=active_rules,
-            subsets=subsets,
-            init_arrays=init_arrays,
-            basis_cache=basis_cache,
-            rule_heights=rule_heights,
-            mu=mu,
-            exc_params=exc_params,
-            inh_params=inh_params,
-            grid_weights_train=grid_weights_train,
-            grid_weights_val=grid_weights_val,
-            device=device,
-            torch_basis_cache=torch_basis_cache,
-            opt_steps=int(opt_steps),
-            lr=lr,
-            penalize_kernel_df=bool(penalize_kernel_df),
-            num_val_sequences=int(num_val_sequences),
-            intensity_model=str(intensity_model),
-        )
-        if float(trial_bic) + 1e-8 < best_bic:
-            best_bic = float(trial_bic)
-            mu = float(trial_mu)
-            active_rules = list(trial_rules)
-            exc_params = dict(trial_exc)
-            inh_params = dict(trial_inh)
-            rule_heights = trial_heights
-            continue
-        break
-
-    improved = True
-    while improved and active_rules:
-        improved = False
-        for j in range(len(active_rules)):
-            trial_active = active_rules[:j] + active_rules[j + 1 :]
-            if not trial_active:
-                trial_bic, trial_mu = fit_constant_bic(
-                    n_events_val=n_events_val,
-                    grid_weights_val=grid_weights_val,
-                    n_events_train=n_events_train,
-                    grid_weights_train=grid_weights_train,
-                    n_val_sequences=int(num_val_sequences),
-                )
-                if float(trial_bic) + 1e-8 < best_bic:
-                    best_bic = float(trial_bic)
-                    mu = float(trial_mu)
-                    active_rules = []
-                    exc_params = {}
-                    inh_params = {}
-                    improved = True
-                    break
-                continue
-            init_coef_map = build_init_coef_map(trial_active, exc_params, inh_params, fallback=0.1)
-            bic, mu_fit, exc_fit, inh_fit, rule_heights, _arrays_fit = optimize_active_set_torch(
-                active_rules=trial_active,
-                subsets=subsets,
-                basis_cache=basis_cache,
-                rule_heights=rule_heights,
-                init_mu=mu,
-                init_coef_map=init_coef_map,
-                grid_weights_train=grid_weights_train,
-                grid_weights_val=grid_weights_val,
-                device=device,
-                torch_basis_cache=torch_basis_cache,
-                steps=max(40, opt_steps // 2),
-                lr=lr,
-                penalize_kernel_df=bool(penalize_kernel_df),
-                bic_num_sequences=int(num_val_sequences),
-                intensity_model=str(intensity_model),
-            )
-            if float(bic) + 1e-8 < best_bic:
-                best_bic = float(bic)
-                mu = float(mu_fit)
-                active_rules = trial_active
-                exc_params = exc_fit
-                inh_params = inh_fit
-                improved = True
-                break
-    return best_bic, mu, exc_params, inh_params, rule_heights, active_rules
-
-
-def post_prune_irreducible_rules(
-    *,
-    active_rules: list[ActiveRule],
-    subsets,
-    basis_cache: SourceBasisCache,
-    rule_heights: dict[tuple[int, int], np.ndarray],
-    mu: float,
-    exc_params: dict[int, float],
-    inh_params: dict[int, float],
-    grid_weights_train: np.ndarray,
-    grid_weights_val: np.ndarray,
-    device: torch.device,
-    torch_basis_cache: TorchBasisCache | None = None,
-    opt_steps: int,
-    lr: float,
-    min_order: int,
-    max_drop_size: int = 1,
-    penalize_kernel_df: bool,
     penalty_scale: float = 1.0,
     num_val_sequences: int | None = None,
-    intensity_model: str = "multiplicative",
-):
-    if not active_rules:
-        return float("inf"), float(mu), exc_params, inh_params, rule_heights, active_rules
+    kernel_smoothness_ridge: float = 0.0,
+    kernel_normalization: str = "peak",
+    support_cache: dict[ExactSupportCacheKey, SupportEvalResult] | None = None,
+    warm_start_result: SupportEvalResult | None = None,
+) -> SupportEvalResult:
+    kernel_normalization = str(kernel_normalization)
+    if kernel_normalization not in {"peak", "area"}:
+        raise ValueError(f"unknown kernel normalization mode: {kernel_normalization}")
+    target_rules = sorted(active_rules, key=lambda ar: (int(ar.idx), str(ar.sign)))
+    target_key = exact_support_cache_key(
+        active_rules=target_rules,
+        basis_cache=basis_cache,
+        base_rule_heights=base_rule_heights,
+        template_rule_heights=template_rule_heights,
+        grid_weights_train=grid_weights_train,
+        grid_weights_val=grid_weights_val,
+        opt_steps=int(opt_steps),
+        lr=float(lr),
+        penalize_kernel_df=bool(penalize_kernel_df),
+        penalty_scale=float(penalty_scale),
+        kernel_smoothness_ridge=float(kernel_smoothness_ridge),
+        num_val_sequences=num_val_sequences,
+        kernel_normalization=kernel_normalization,
+    )
+    # A finite-step refit is not invariant to warm-start parameters/heights.
+    # Cache only cold-start support refits, and bind them to the exact
+    # full/validation context plus current base height map.
+    cache_enabled = support_cache is not None and warm_start_result is None
+    if cache_enabled:
+        cached = support_cache.get(target_key)
+        if cached is not None:
+            return cached
 
-    init_coef_map = build_init_coef_map(active_rules, exc_params, inh_params, fallback=0.1)
-    # Exact refit for the current active set before nested pruning.
-    best_bic, mu_fit, exc_fit, inh_fit, rule_heights, arrays_out = optimize_active_set_torch(
-        active_rules=active_rules,
+    if not target_rules:
+        n_train = int(basis_cache.train_event_times.size)
+        n_val = int(basis_cache.val_event_times.size)
+        bic, mu = fit_constant_bic(
+            n_events_val=n_val,
+            grid_weights_val=grid_weights_val,
+            n_events_train=n_train,
+            grid_weights_train=grid_weights_train,
+            n_val_sequences=int(num_val_sequences if num_val_sequences is not None else 1),
+        )
+        result = SupportEvalResult(
+            bic=float(bic),
+            mu=float(mu),
+            exc_params={},
+            inh_params={},
+            rule_heights=base_rule_heights,
+            arrays_out=None,
+            active_rules=[],
+        )
+        if cache_enabled:
+            support_cache[target_key] = minimal_cache_result(result)
+        return result
+
+    init_rule_heights, init_coef_map = _build_support_warm_start(
+        target_rules=target_rules,
+        subsets=subsets,
+        base_rule_heights=base_rule_heights,
+        template_rule_heights=template_rule_heights,
+        warm_start_result=warm_start_result,
+        fallback=0.1,
+    )
+    bic, mu_fit, exc_fit, inh_fit, trial_heights, arrays_fit = optimize_active_set_torch(
+        active_rules=target_rules,
         subsets=subsets,
         basis_cache=basis_cache,
-        rule_heights=rule_heights,
-        init_mu=mu,
+        rule_heights=init_rule_heights,
         init_coef_map=init_coef_map,
         grid_weights_train=grid_weights_train,
         grid_weights_val=grid_weights_val,
         device=device,
         torch_basis_cache=torch_basis_cache,
-        steps=max(60, int(opt_steps)),
-        lr=lr,
+        steps=int(opt_steps),
+        lr=float(lr),
         penalize_kernel_df=bool(penalize_kernel_df),
         penalty_scale=float(penalty_scale),
         bic_num_sequences=num_val_sequences,
-        intensity_model=str(intensity_model),
+        kernel_smoothness_ridge=float(kernel_smoothness_ridge),
+        kernel_normalization=kernel_normalization,
     )
-    mu = float(mu_fit)
-    exc_params = dict(exc_fit)
-    inh_params = dict(inh_fit)
-    active_rules = list(active_rules)
-    train_event_len = int(next(iter(arrays_out.values()))[0].size)
-    val_event_len = int(next(iter(arrays_out.values()))[2].size)
-
-    improved = True
-    while improved:
-        improved = False
-        removable = [j for j, ar in enumerate(active_rules) if len(tuple(subsets[int(ar.idx)])) >= int(min_order)]
-        best_drop = None
-        for drop_size in range(1, min(int(max_drop_size), len(removable)) + 1):
-            for idxs in itertools.combinations(removable, drop_size):
-                idx_set = set(int(j) for j in idxs)
-                trial_active = [ar for j, ar in enumerate(active_rules) if j not in idx_set]
-                if not trial_active:
-                    trial_bic, trial_mu = fit_constant_bic(
-                        n_events_val=val_event_len,
-                        grid_weights_val=grid_weights_val,
-                        n_events_train=train_event_len,
-                        grid_weights_train=grid_weights_train,
-                        n_val_sequences=int(num_val_sequences if num_val_sequences is not None else len(grid_weights_val)),
-                    )
-                    trial = (
-                        float(trial_bic),
-                        float(trial_mu),
-                        {},
-                        {},
-                        rule_heights,
-                        {},
-                        trial_active,
-                    )
-                else:
-                    init_coef_map = build_init_coef_map(trial_active, exc_params, inh_params, fallback=0.1)
-                    trial_bic, trial_mu, trial_exc, trial_inh, trial_heights, trial_arrays = optimize_active_set_torch(
-                        active_rules=trial_active,
-                        subsets=subsets,
-                        basis_cache=basis_cache,
-                        rule_heights=rule_heights,
-                        init_mu=mu,
-                        init_coef_map=init_coef_map,
-                        grid_weights_train=grid_weights_train,
-                        grid_weights_val=grid_weights_val,
-                        device=device,
-                        torch_basis_cache=torch_basis_cache,
-                        steps=max(25, int(opt_steps) // 4),
-                        lr=lr,
-                        penalize_kernel_df=bool(penalize_kernel_df),
-                        penalty_scale=float(penalty_scale),
-                        bic_num_sequences=num_val_sequences,
-                        intensity_model=str(intensity_model),
-                    )
-                    trial = (
-                        float(trial_bic),
-                        float(trial_mu),
-                        dict(trial_exc),
-                        dict(trial_inh),
-                        trial_heights,
-                        trial_arrays,
-                        trial_active,
-                    )
-                if best_drop is None or trial[0] < best_drop[0]:
-                    best_drop = trial
-        if best_drop is None:
-            break
-        trial_bic, trial_mu, trial_exc, trial_inh, trial_heights, trial_arrays, trial_active = best_drop
-        if float(trial_bic) + 1e-8 < float(best_bic):
-            best_bic = float(trial_bic)
-            mu = float(trial_mu)
-            exc_params = dict(trial_exc)
-            inh_params = dict(trial_inh)
-            rule_heights = trial_heights
-            arrays_out = trial_arrays
-            active_rules = trial_active
-            improved = True
-    return best_bic, mu, exc_params, inh_params, rule_heights, active_rules
+    result = SupportEvalResult(
+        bic=float(bic),
+        mu=float(mu_fit),
+        exc_params=dict(exc_fit),
+        inh_params=dict(inh_fit),
+        rule_heights=trial_heights,
+        arrays_out=arrays_fit,
+        active_rules=list(target_rules),
+    )
+    if cache_enabled:
+        support_cache[target_key] = minimal_cache_result(result)
+    return result
 
 
-def canonical_profile_backward_prune(
+def evaluate_support_exact_batch(
     *,
-    active_rules: list[ActiveRule],
+    support_rule_lists: list[list[ActiveRule]],
     subsets,
     basis_cache: SourceBasisCache,
-    rule_heights: dict[tuple[int, int], np.ndarray],
-    kernels,
-    mu: float,
-    exc_params: dict[int, float],
-    inh_params: dict[int, float],
+    base_rule_heights: dict[tuple[int, int], np.ndarray],
+    template_rule_heights: dict[str, dict[tuple[int, int], np.ndarray]] | None,
     grid_weights_train: np.ndarray,
     grid_weights_val: np.ndarray,
     device: torch.device,
-    torch_basis_cache: TorchBasisCache | None = None,
+    torch_basis_cache: TorchBasisCache | None,
     opt_steps: int,
     lr: float,
     penalize_kernel_df: bool,
     penalty_scale: float = 1.0,
     num_val_sequences: int | None = None,
-) -> tuple[float, float, dict[int, float], dict[int, float], dict[tuple[int, int], np.ndarray], list[ActiveRule]]:
-    if not active_rules:
-        return float("inf"), float(mu), exc_params, inh_params, rule_heights, active_rules
-
-    cur_rules = list(active_rules)
-    cur_mu = float(mu)
-    cur_exc = dict(exc_params)
-    cur_inh = dict(inh_params)
-    cur_heights = rule_heights
-    n_eff = bic_sample_size(int(num_val_sequences) if num_val_sequences is not None else int(grid_weights_val.size))
-    log_n = math.log(float(n_eff))
-    changed = False
-    arrays_out = compute_active_rule_feature_arrays(
-        active_rules=cur_rules,
-        subsets=subsets,
-        basis_cache=basis_cache,
-        rule_heights=cur_heights,
-        kernels=kernels,
-    )
-
-    while cur_rules:
-        tr_event_len = int(next(iter(arrays_out.values()))[0].size)
-        tr_grid_len = int(next(iter(arrays_out.values()))[1].size)
-        total_exc_ev, total_inh_ev, total_exc_gr, total_inh_gr = contributions_from_active(
-            active_rules=cur_rules,
-            arrays_out=arrays_out,
-            exc_params=cur_exc,
-            inh_params=cur_inh,
-            tr_event_len=tr_event_len,
-            tr_grid_len=tr_grid_len,
-        )
-
-        best_drop: tuple[float, int] | None = None
-        for j, ar in enumerate(cur_rules):
-            idx = int(ar.idx)
-            sign = str(ar.sign)
-            coef = float(cur_exc.get(idx, 0.0) if sign == "exc" else cur_inh.get(idx, 0.0))
-            feat_event = np.asarray(arrays_out[idx][0], dtype=np.float64)
-            feat_grid = np.asarray(arrays_out[idx][1], dtype=np.float64)
-            if sign == "exc":
-                base_exc_gr = total_exc_gr - coef * feat_grid
-                base_inh_gr = total_inh_gr
-            else:
-                base_exc_gr = total_exc_gr
-                base_inh_gr = total_inh_gr - coef * feat_grid
-            base_lp_grid = np.asarray(base_exc_gr - base_inh_gr, dtype=np.float64)
-            penalty = 0.5 * float(penalty_scale) * log_n * (
-                float(rule_param_dim(subsets[idx], basis_cache.knots.size)) if penalize_kernel_df else 1.0
-            )
-            gain, _ = profiled_gain_canonical_sign(
-                feat_event=feat_event,
-                feat_grid=feat_grid,
-                base_lp_grid=base_lp_grid,
-                grid_weights_train=grid_weights_train,
-                sign=sign,
-                penalty=penalty,
-            )
-            if best_drop is None or float(gain) < float(best_drop[0]):
-                best_drop = (float(gain), int(j))
-
-        if best_drop is None or float(best_drop[0]) > 1e-8:
-            break
-
-        drop_j = int(best_drop[1])
-        drop_rule = cur_rules[drop_j]
-        trial_rules = cur_rules[:drop_j] + cur_rules[drop_j + 1 :]
-        if not trial_rules:
-            break
-        idx = int(drop_rule.idx)
-        if str(drop_rule.sign) == "exc":
-            cur_exc.pop(idx, None)
-        else:
-            cur_inh.pop(idx, None)
-        cur_rules = list(trial_rules)
-        changed = True
-
-    if changed and cur_rules:
-        init_coef_map = build_init_coef_map(cur_rules, cur_exc, cur_inh, fallback=0.1)
-        final_bic, cur_mu, cur_exc, cur_inh, cur_heights, _arrays_out = optimize_active_set_torch(
-            active_rules=cur_rules,
-            subsets=subsets,
-            basis_cache=basis_cache,
-            rule_heights=cur_heights,
-            init_mu=cur_mu,
-            init_coef_map=init_coef_map,
-            grid_weights_train=grid_weights_train,
-            grid_weights_val=grid_weights_val,
-            device=device,
-            torch_basis_cache=torch_basis_cache,
-            steps=max(40, int(opt_steps)),
-            lr=lr,
-            penalize_kernel_df=bool(penalize_kernel_df),
-            penalty_scale=float(penalty_scale),
-            bic_num_sequences=num_val_sequences,
-            intensity_model="canonical_loglink",
-        )
-        return float(final_bic), float(cur_mu), dict(cur_exc), dict(cur_inh), cur_heights, cur_rules
-
-    final_bic = validation_bic_from_arrays(
-        active_rules=cur_rules,
-        mu=float(cur_mu),
-        exc_params=cur_exc,
-        inh_params=cur_inh,
-        arrays_out=arrays_out,
-        grid_weights_val=grid_weights_val,
-        subsets=subsets,
-        num_knots=basis_cache.knots.size,
-        penalize_kernel_df=bool(penalize_kernel_df),
-        penalty_scale=float(penalty_scale),
-        num_sequences_val=num_val_sequences,
-        intensity_model="canonical_loglink",
-    )
-    return float(final_bic), float(cur_mu), dict(cur_exc), dict(cur_inh), cur_heights, cur_rules
-
-
-def build_overlap_components(
-    active_rules: list[ActiveRule],
-    subsets,
-    *,
-    same_sign_only: bool = True,
-) -> list[list[ActiveRule]]:
-    if not active_rules:
-        return []
-    n = len(active_rules)
-    adj = [[] for _ in range(n)]
-    subset_sets = [set(int(s) for s in subsets[int(ar.idx)]) for ar in active_rules]
-    for i in range(n):
-        for j in range(i + 1, n):
-            if bool(same_sign_only) and str(active_rules[i].sign) != str(active_rules[j].sign):
-                continue
-            if subset_sets[i].intersection(subset_sets[j]):
-                adj[i].append(j)
-                adj[j].append(i)
-    seen = [False] * n
-    comps: list[list[ActiveRule]] = []
-    for i in range(n):
-        if seen[i]:
+    kernel_smoothness_ridge: float = 0.0,
+    support_cache: dict[ExactSupportCacheKey, SupportEvalResult] | None = None,
+    warm_start_result: SupportEvalResult | None = None,
+    score_only: bool = False,
+    exact_batch_size: int = 8,
+) -> dict[SupportKey, SupportEvalResult]:
+    out: dict[SupportKey, SupportEvalResult] = {}
+    pending_by_size: dict[int, list[list[ActiveRule]]] = {}
+    cache_enabled = support_cache is not None and warm_start_result is None
+    # Implementation-only batching parameter: it changes GPU utilization, not
+    # the evaluated support objective or accepted support path.
+    exact_batch_size = max(1, int(exact_batch_size))
+    for rules in support_rule_lists:
+        rules = sort_unique_sign_exclusive_rules(list(rules))
+        target_support_key = support_key_from_rules(rules)
+        if target_support_key in out:
             continue
-        stack = [i]
-        seen[i] = True
-        comp_idx = []
-        while stack:
-            cur = stack.pop()
-            comp_idx.append(cur)
-            for nxt in adj[cur]:
-                if not seen[nxt]:
-                    seen[nxt] = True
-                    stack.append(nxt)
-        comps.append([active_rules[k] for k in sorted(comp_idx)])
-    return comps
+        cache_key = exact_support_cache_key(
+            active_rules=rules,
+            basis_cache=basis_cache,
+            base_rule_heights=base_rule_heights,
+            template_rule_heights=template_rule_heights,
+            grid_weights_train=grid_weights_train,
+            grid_weights_val=grid_weights_val,
+            opt_steps=int(opt_steps),
+            lr=float(lr),
+            penalize_kernel_df=bool(penalize_kernel_df),
+            penalty_scale=float(penalty_scale),
+            kernel_smoothness_ridge=float(kernel_smoothness_ridge),
+            num_val_sequences=num_val_sequences,
+        )
+        if cache_enabled:
+            cached = support_cache.get(cache_key)
+            if cached is not None:
+                out[target_support_key] = cached
+                continue
+        pending_by_size.setdefault(int(len(rules)), []).append(rules)
 
-
-def component_subset_search(
-    *,
-    active_rules: list[ActiveRule],
-    subsets,
-    basis_cache: SourceBasisCache,
-    rule_heights: dict[tuple[int, int], np.ndarray],
-    mu: float,
-    exc_params: dict[int, float],
-    inh_params: dict[int, float],
-    grid_weights_train: np.ndarray,
-    grid_weights_val: np.ndarray,
-    device: torch.device,
-    torch_basis_cache: TorchBasisCache | None = None,
-    opt_steps: int,
-    lr: float,
-    penalize_kernel_df: bool,
-    penalty_scale: float = 1.0,
-    num_val_sequences: int | None = None,
-    same_sign_only: bool = True,
-    intensity_model: str = "multiplicative",
-):
-    if not active_rules:
-        return float("inf"), float(mu), exc_params, inh_params, rule_heights, active_rules
-
-    cur_rules = list(active_rules)
-    cur_mu = float(mu)
-    cur_exc = dict(exc_params)
-    cur_inh = dict(inh_params)
-    cur_heights = rule_heights
-    best_bic = float("inf")
-
-    while True:
-        init_coef_map = build_init_coef_map(cur_rules, cur_exc, cur_inh, fallback=0.1)
-        best_bic, mu_fit, exc_fit, inh_fit, cur_heights, arrays_out = optimize_active_set_torch(
-            active_rules=cur_rules,
+    def eval_serial(rules: list[ActiveRule]) -> SupportEvalResult:
+        return evaluate_support_exact(
+            active_rules=rules,
             subsets=subsets,
             basis_cache=basis_cache,
-            rule_heights=cur_heights,
-            init_mu=cur_mu,
-            init_coef_map=init_coef_map,
+            base_rule_heights=base_rule_heights,
+            template_rule_heights=template_rule_heights,
             grid_weights_train=grid_weights_train,
             grid_weights_val=grid_weights_val,
             device=device,
             torch_basis_cache=torch_basis_cache,
-            steps=max(40, int(opt_steps)),
-            lr=lr,
+            opt_steps=int(opt_steps),
+            lr=float(lr),
             penalize_kernel_df=bool(penalize_kernel_df),
             penalty_scale=float(penalty_scale),
-            bic_num_sequences=num_val_sequences,
-            intensity_model=str(intensity_model),
+            num_val_sequences=num_val_sequences,
+            kernel_smoothness_ridge=float(kernel_smoothness_ridge),
+            support_cache=support_cache,
+            warm_start_result=warm_start_result,
         )
-        cur_mu = float(mu_fit)
-        cur_exc = dict(exc_fit)
-        cur_inh = dict(inh_fit)
-        comps = build_overlap_components(cur_rules, subsets, same_sign_only=bool(same_sign_only))
-        changed = False
-        next_rules: list[ActiveRule] = []
-        for comp in comps:
-            if len(comp) <= 1:
-                next_rules.extend(comp)
+
+    for _support_size, rules_group in sorted(pending_by_size.items(), key=lambda item: int(item[0])):
+        if len(rules_group) < 2 and not bool(score_only):
+            for rules in rules_group:
+                out[support_key_from_rules(rules)] = eval_serial(rules)
+            continue
+        for start in range(0, len(rules_group), int(exact_batch_size)):
+            chunk = rules_group[start: start + int(exact_batch_size)]
+            if len(chunk) < 2 and not bool(score_only):
+                rules = chunk[0]
+                out[support_key_from_rules(rules)] = eval_serial(rules)
                 continue
-            outside = [ar for ar in cur_rules if ar not in comp]
-            best_subset = list(comp)
-            best_subset_score = float(best_bic)
-            for mask in range(1 << len(comp)):
-                subset_rules = [comp[j] for j in range(len(comp)) if (mask >> j) & 1]
-                cand_rules = outside + subset_rules
-                if not cand_rules:
-                    cand_score, _ = fit_constant_bic(
-                        n_events_val=int(next(iter(arrays_out.values()))[2].size),
-                        grid_weights_val=grid_weights_val,
-                        n_events_train=int(next(iter(arrays_out.values()))[0].size),
+            chunk_results = optimize_active_set_torch_batch_same_size(
+                active_rule_lists=chunk,
+                subsets=subsets,
+                basis_cache=basis_cache,
+                base_rule_heights=base_rule_heights,
+                template_rule_heights=template_rule_heights,
+                grid_weights_train=grid_weights_train,
+                grid_weights_val=grid_weights_val,
+                device=device,
+                torch_basis_cache=torch_basis_cache,
+                steps=int(opt_steps),
+                lr=float(lr),
+                penalize_kernel_df=bool(penalize_kernel_df),
+                penalty_scale=float(penalty_scale),
+                bic_num_sequences=num_val_sequences,
+                kernel_smoothness_ridge=float(kernel_smoothness_ridge),
+                warm_start_result=warm_start_result,
+                score_only=bool(score_only),
+            )
+            out.update(chunk_results)
+            if cache_enabled:
+                for rules in chunk:
+                    result = chunk_results.get(support_key_from_rules(rules))
+                    if result is None:
+                        continue
+                    cache_key = exact_support_cache_key(
+                        active_rules=rules,
+                        basis_cache=basis_cache,
+                        base_rule_heights=base_rule_heights,
+                        template_rule_heights=template_rule_heights,
                         grid_weights_train=grid_weights_train,
-                        n_val_sequences=int(num_val_sequences if num_val_sequences is not None else len(grid_weights_val)),
-                    )
-                elif len(cand_rules) == len(cur_rules) and all(a == b for a, b in zip(cand_rules, cur_rules)):
-                    cand_score = float(best_bic)
-                else:
-                    cand_score = validation_bic_from_arrays(
-                        active_rules=cand_rules,
-                        arrays_out=arrays_out,
-                        exc_params=cur_exc,
-                        inh_params=cur_inh,
-                        mu=cur_mu,
-                        subsets=subsets,
-                        num_knots=basis_cache.knots.size,
                         grid_weights_val=grid_weights_val,
+                        opt_steps=int(opt_steps),
+                        lr=float(lr),
                         penalize_kernel_df=bool(penalize_kernel_df),
                         penalty_scale=float(penalty_scale),
-                        num_sequences_val=num_val_sequences,
-                        intensity_model=str(intensity_model),
+                        kernel_smoothness_ridge=float(kernel_smoothness_ridge),
+                        num_val_sequences=num_val_sequences,
                     )
-                if float(cand_score) + 1e-8 < float(best_subset_score):
-                    best_subset_score = float(cand_score)
-                    best_subset = subset_rules
-            if len(best_subset) != len(comp) or any(a != b for a, b in zip(best_subset, comp)):
-                changed = True
-            next_rules.extend(best_subset)
-        next_rules = sorted(next_rules, key=lambda ar: (int(ar.idx), str(ar.sign)))
-        cur_rules = next_rules
-        if not changed:
-            return best_bic, cur_mu, cur_exc, cur_inh, cur_heights, cur_rules
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--data", required=True)
-    ap.add_argument("--config", required=True)
-    ap.add_argument("--fixed_target", type=int, required=True)
-    ap.add_argument("--max_order", type=int, default=3)
-    ap.add_argument("--max_lag", type=float, default=10.0)
-    ap.add_argument("--kernel_num_bins", type=int, default=40)
-    ap.add_argument("--kernel_num_knots", type=int, default=7)
-    ap.add_argument("--grid_step", type=float, default=0.0)
-    ap.add_argument("--max_rules", type=int, default=12)
-    ap.add_argument("--opt_steps", type=int, default=120)
-    ap.add_argument("--lr", type=float, default=0.05)
-    ap.add_argument("--device", default="auto")
-    ap.add_argument("--cpu_threads", type=int, default=0)
-    ap.add_argument("--family_attribution_passes", type=int, default=1)
-    ap.add_argument("--post_prune_min_order", type=int, default=1)
-    ap.add_argument("--post_prune_max_drop_size", type=int, default=2)
-    ap.add_argument("--seed", type=int, default=0)
-    args = ap.parse_args()
-    configure_runtime_resources(None if int(args.cpu_threads) <= 0 else int(args.cpu_threads))
-    configure_deterministic_research(seed=int(args.seed), deterministic=True)
-
-    train, val, metadata = load_dataset(args.data)
-    config = load_yaml(args.config)
-    intensity_model = str(config.get("intensity_model", "multiplicative"))
-    target = int(args.fixed_target)
-    gt = gt_rules_from_config(config)
-    num_types = int(metadata["num_types"])
-    time_horizon = float(config.get("time_horizon", max(max(seq["time"]) for seq in train + val)))
-    source_ids = tuple(sorted(k for k in range(num_types) if k != target))
-
-    train_arrays = build_seq_event_arrays(train, num_types)
-    val_arrays = build_seq_event_arrays(val, num_types)
-    global_kernels = estimate_source_kernels(
-        train_arrays,
-        source_ids=source_ids,
-        target=target,
-        max_lag=float(args.max_lag),
-        num_bins=int(args.kernel_num_bins),
-        num_knots=int(args.kernel_num_knots),
-        time_horizon=float(time_horizon),
-    )
-    grid_step = float(args.grid_step) if float(args.grid_step) > 0.0 else auto_grid_step(global_kernels)
-
-    tr_event_seq, tr_event_times = collect_target_events(train, target=target)
-    va_event_seq, va_event_times = collect_target_events(val, target=target)
-    tr_grid_seq, tr_grid_times, tr_grid_w = build_midpoint_grid(train, time_horizon=float(time_horizon), step=grid_step)
-    va_grid_seq, va_grid_times, va_grid_w = build_midpoint_grid(val, time_horizon=float(time_horizon), step=grid_step)
-
-    a_train_event, a_train_grid, a_val_event, a_val_grid = build_global_activity(
-        train_arrays=train_arrays,
-        val_arrays=val_arrays,
-        kernels=global_kernels,
-        source_ids=source_ids,
-        tr_event_seq=tr_event_seq,
-        tr_event_times=tr_event_times,
-        tr_grid_seq=tr_grid_seq,
-        tr_grid_times=tr_grid_times,
-        va_event_seq=va_event_seq,
-        va_event_times=va_event_times,
-        va_grid_seq=va_grid_seq,
-        va_grid_times=va_grid_times,
-    )
-
-    basis_cache = SourceBasisCache(
-        source_ids=source_ids,
-        knots=next(iter(global_kernels.values())).knots,
-        train_arrays=train_arrays,
-        val_arrays=val_arrays,
-        train_event_seq_ids=tr_event_seq,
-        train_event_times=tr_event_times,
-        train_grid_seq_ids=tr_grid_seq,
-        train_grid_times=tr_grid_times,
-        val_event_seq_ids=va_event_seq,
-        val_event_times=va_event_times,
-        val_grid_seq_ids=va_grid_seq,
-        val_grid_times=va_grid_times,
-    )
-    from conjunctive_rule_initializer import build_event_lag_bin_cache
-    train_event_lag_bin_cache = build_event_lag_bin_cache(
-        train_arrays,
-        source_ids=source_ids,
-        target_seq_ids=tr_event_seq,
-        target_times=tr_event_times,
-        max_lag=float(args.max_lag),
-        num_bins=int(args.kernel_num_bins),
-    )
-    subsets = subset_list(source_ids, int(args.max_order))
-    src_to_col_global = {int(s): j for j, s in enumerate(source_ids)}
-    rule_heights = initialize_rule_specific_heights(
-        subsets=subsets,
-        source_ids=source_ids,
-        global_kernels=global_kernels,
-        global_activity_event=a_train_event,
-        src_to_col_global=src_to_col_global,
-        train_arrays=train_arrays,
-        train_event_lag_bin_cache=train_event_lag_bin_cache,
-        max_lag=float(args.max_lag),
-        num_bins=int(args.kernel_num_bins),
-        time_horizon=float(time_horizon),
-    )
-    init_arrays = compute_rule_feature_arrays(
-        subsets=subsets,
-        basis_cache=basis_cache,
-        rule_heights=rule_heights,
-        kernels=global_kernels,
-    )
-
-    if args.device == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        device = torch.device(args.device)
-    torch_basis_cache = TorchBasisCache(basis_cache, device)
-
-    bic, mu, exc_params, inh_params, rule_heights, active_rules = run_active_set(
-        subsets=subsets,
-        init_arrays=init_arrays,
-        rule_heights=rule_heights,
-        basis_cache=basis_cache,
-        grid_weights_train=np.asarray(tr_grid_w, dtype=np.float64),
-        grid_weights_val=np.asarray(va_grid_w, dtype=np.float64),
-        max_rules=int(args.max_rules),
-        opt_steps=int(args.opt_steps),
-        lr=float(args.lr),
-        device=device,
-        torch_basis_cache=torch_basis_cache,
-        penalize_kernel_df=False,
-        num_val_sequences=len(val),
-        intensity_model=intensity_model,
-    )
-    if int(args.family_attribution_passes) > 0:
-        bic, mu, exc_params, inh_params, rule_heights, active_rules = family_attribution_refine(
-            active_rules=active_rules,
-            subsets=subsets,
-            basis_cache=basis_cache,
-            rule_heights=rule_heights,
-            mu=float(mu),
-            exc_params=exc_params,
-            inh_params=inh_params,
-            grid_weights_train=np.asarray(tr_grid_w, dtype=np.float64),
-            grid_weights_val=np.asarray(va_grid_w, dtype=np.float64),
-            device=device,
-            torch_basis_cache=torch_basis_cache,
-            opt_steps=int(args.opt_steps),
-            lr=float(args.lr),
-            passes=int(args.family_attribution_passes),
-            num_val_sequences=len(val),
-            intensity_model=intensity_model,
-        )
-    chosen_post_prune_scale = 1.0
-    bic, mu, exc_params, inh_params, rule_heights, active_rules = post_prune_irreducible_rules(
-        active_rules=active_rules,
-        subsets=subsets,
-        basis_cache=basis_cache,
-        rule_heights=rule_heights,
-        mu=float(mu),
-        exc_params=exc_params,
-        inh_params=inh_params,
-        grid_weights_train=np.asarray(tr_grid_w, dtype=np.float64),
-        grid_weights_val=np.asarray(va_grid_w, dtype=np.float64),
-        device=device,
-        torch_basis_cache=torch_basis_cache,
-        opt_steps=int(args.opt_steps),
-        lr=float(args.lr),
-        min_order=int(args.post_prune_min_order),
-        max_drop_size=int(args.post_prune_max_drop_size),
-        penalize_kernel_df=False,
-        penalty_scale=1.0,
-        num_val_sequences=len(val),
-        intensity_model=intensity_model,
-    )
-    bic, mu, exc_params, inh_params, rule_heights, active_rules = component_subset_search(
-        active_rules=active_rules,
-        subsets=subsets,
-        basis_cache=basis_cache,
-        rule_heights=rule_heights,
-        mu=float(mu),
-        exc_params=exc_params,
-        inh_params=inh_params,
-        grid_weights_train=np.asarray(tr_grid_w, dtype=np.float64),
-        grid_weights_val=np.asarray(va_grid_w, dtype=np.float64),
-        device=device,
-        torch_basis_cache=torch_basis_cache,
-        opt_steps=int(args.opt_steps),
-        lr=float(args.lr),
-        penalize_kernel_df=False,
-        penalty_scale=1.0,
-        num_val_sequences=len(val),
-        same_sign_only=True,
-        intensity_model=intensity_model,
-    )
-
-    preds = summarize_results(subsets=subsets, exc_params=exc_params, inh_params=inh_params, target=target)
-    hit = sorted(gt & preds)
-    miss = sorted(gt - preds)
-    extra = sorted(preds - gt)
-    print("===E2E RULE-DEPENDENT ACTIVE-SET REPORT===")
-    print(
-        "best_params:",
-        {
-            "target": target,
-            "selected_rule_count": int(len(preds)),
-            "train_target_events": int(len(tr_event_times)),
-            "val_target_events": int(len(va_event_times)),
-            "grid_step": float(grid_step),
-            "grid_train": int(len(tr_grid_times)),
-            "grid_val": int(len(va_grid_times)),
-            "bic": float(bic),
-            "mu": float(mu),
-            "device": str(device),
-            "intensity_model": intensity_model,
-            "post_prune_penalty_scale": None if chosen_post_prune_scale is None else float(chosen_post_prune_scale),
-        },
-    )
-    print_rule_block("True rules:", sorted(gt), target)
-    print_rule_block("Predicted rules:", sorted(preds), target)
-    print_rule_block("Matched rules:", hit, target)
-    print_rule_block("Missing rules:", miss, target)
-    print_rule_block("Extra predicted rules:", extra, target)
-    print("Estimated rule-dependent kernels:")
-    for idx in sorted(set(list(exc_params.keys()) + list(inh_params.keys()))):
-        for src in subsets[int(idx)]:
-            print(
-                {
-                    "subset": tuple(int(s) for s in subsets[int(idx)]),
-                    "source": int(src),
-                    "kernel_knots": [float(x) for x in global_kernels[int(src)].knots],
-                    "kernel_heights": [float(x) for x in normalize_piecewise_area(global_kernels[int(src)].knots, rule_heights[(int(idx), int(src))])],
-                }
-            )
-
-
-if __name__ == "__main__":
-    main()
+                    support_cache[cache_key] = minimal_cache_result(result)
+    return out

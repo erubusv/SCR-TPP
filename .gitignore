@@ -1,12 +1,93 @@
+# Python/runtime artifacts
 __pycache__/
 *.py[cod]
-
+*.pyo
+*.nbi
+*.nbc
 .ipynb_checkpoints/
 
-**/*.csv
-**/*.zip
-
+# Local editor/system files
 .vscode/
-
 .DS_Store
-**/.*
+.env
+.env.*
+secure/
+*.key
+*.pem
+
+# Generated data and experiment outputs
+data/paper_suite/datasets/
+data/paper_suite/results/
+data/paper_suite/logs/
+data/realworld_raw/
+data/realworld_prepared/
+data/realworld_results/
+
+# Logs and process markers
+*.log
+*.pid
+RUNNING
+FINISHED
+STATUS
+runs/
+wandb/
+lightning_logs/
+events.out.tfevents*
+
+# Paper/research artifacts not needed to run the code
+workspace/train/research_docs/
+**/research_docs/
+**/benchmark_results/
+benchmarks/
+notebooks/
+**/notebooks/
+**/figures/
+**/plots/
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.eps
+feedback.md
+adjustment.md
+plan.md
+code_errors.md
+objective_review.md
+baseline_difference.md
+gemini_fix.md
+gpt_fix*.md
+excelleration.md
+*_research_notes.md
+*handoff*.md
+
+# Large or transient model artifacts
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.pickle
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.zip
+
+# Generated tables
+*.csv
+*.jsonl
+
+# Scratch files
+tmp_*
+*_tmp.*
+
+# External baseline snapshots: keep executable source, ignore docs/examples/tests.
+external/official_baselines/**/.git/
+external/official_baselines/EasyTemporalPointProcess/.github/
+external/official_baselines/EasyTemporalPointProcess/docs/
+external/official_baselines/EasyTemporalPointProcess/examples/
+external/official_baselines/EasyTemporalPointProcess/notebooks/
+external/official_baselines/EasyTemporalPointProcess/tests/
+external/official_baselines/EasyTemporalPointProcess/requirements-doc.txt
+external/official_baselines/EventSequenceClustering/
