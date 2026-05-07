@@ -1,7 +1,9 @@
 # Paper Suite Layout
 
-This directory holds reproducible synthetic benchmark configs. Generated
-datasets, logs, and result tables are local artifacts and are ignored by git.
+This directory holds reproducible synthetic benchmark configs. No generated
+dataset is committed. `scripts/reproduce_synthetic.sh` regenerates the datasets
+from these configs before running the models. Generated datasets, logs, and
+result tables are local artifacts and are ignored by git.
 
 ## Structure
 
@@ -15,7 +17,7 @@ datasets, logs, and result tables are local artifacts and are ignored by git.
 - `configs/hetero_source_1000_adjusted/`
   - data-size ablation configs
 - `datasets/`
-  - generated locally by the synthetic data scripts
+  - generated locally by `scripts/reproduce_synthetic.sh`
 - `results/` and `logs/`
   - generated locally by benchmark runners
 

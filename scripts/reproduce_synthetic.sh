@@ -24,6 +24,33 @@ printf '%s\n' "${result_root}" > data/paper_suite/results/latest_synthetic_repro
 
 IFS=',' read -r -a seeds <<< "${seeds_csv}"
 
+if [[ "${GENERATE_SYNTHETIC_DATA:-1}" == "1" ]]; then
+  echo "[synthetic] generating datasets from ${config_root}"
+  CONFIG_ROOT="${config_root}" SEEDS_CSV="${seeds_csv}" python - <<'PY'
+import os
+import sys
+from pathlib import Path
+
+repo_root = Path.cwd()
+active_dir = repo_root / "workspace" / "train" / "paper_benchmark_active"
+sys.path.insert(0, str(repo_root))
+sys.path.insert(0, str(active_dir))
+
+from run_paper_benchmarks import generate_dataset
+
+config_root = Path(os.environ["CONFIG_ROOT"])
+seeds = [int(part) for part in os.environ["SEEDS_CSV"].split(",") if part.strip()]
+config_paths = sorted(config_root.glob("*.yaml"))
+if not config_paths:
+    raise SystemExit(f"no synthetic config files found under {config_root}")
+
+for seed in seeds:
+    for config_path in config_paths:
+        out = generate_dataset(config_path, dataset_seed=seed)
+        print(f"[synthetic-data] seed={seed} config={config_path.stem} -> {out}", flush=True)
+PY
+fi
+
 if [[ "${RUN_SCR_TPP:-1}" == "1" ]]; then
   for seed in "${seeds[@]}"; do
     echo "[synthetic] SCR-TPP seed=${seed}"
@@ -32,6 +59,7 @@ if [[ "${RUN_SCR_TPP:-1}" == "1" ]]; then
     CPU_THREADS="${OMP_NUM_THREADS}" \
     workspace/train/paper_benchmark_active/run_benchmarks.sh \
       --dataset_seed "${seed}" \
+      --reuse_dataset \
       --result_path "${result_root}/scr_tpp/scr_tpp_seed${seed}.json" \
       > "${result_root}/logs/scr_tpp_seed${seed}.log" 2>&1
   done
