@@ -42,6 +42,19 @@ SCR-TPP/
 
 ## How to Reproduce the Results
 
+Use the artifact release tag for reproducibility:
+
+```bash
+git checkout scr-tpp-artifact-v1
+```
+
+All reported artifact results should be reproduced from this tag. The exact
+commit SHA can be checked with:
+
+```bash
+git rev-parse scr-tpp-artifact-v1
+```
+
 Build the Docker image:
 
 ```bash
